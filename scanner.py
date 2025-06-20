@@ -1,4 +1,4 @@
-# scanner.py
+#scanner.py
 """Lantern – Library Scanner
 Supports scanning multiple roots for movies and TV shows.
 - Movies: same as before, with parent_id grouping.
@@ -14,13 +14,13 @@ from pathlib import Path
 import os
 import re
 import sqlite3
-import subprocess  # Import subprocess to fix NameError
+import subprocess
 import json
 import time
 import requests
 import logging
 import argparse
-import sys  # For sys.exit in unit tests
+import sys
 from database import get_db_connection
 from difflib import SequenceMatcher
 
@@ -88,10 +88,10 @@ KEYWORD_OVERRIDES = {
 # ────────────────────────── LOGGING ──────────────────────────────────────────
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
-    filename="logs/scanner_tmdb.log",
+    filename="logs/scanner.log",  # Changed to a separate log file for scanner
     filemode="a",
     format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO
+    level=logging.INFO  # Can be set to DEBUG for more verbose output
 )
 
 # ──────────────────── TMDb HELPER FUNCTIONS ──────────────────────────────────
@@ -185,7 +185,6 @@ def download_tmdb_image(tmdb_image_path: str, local_dest: Path):
     image_url = f"https://image.tmdb.org/t/p/w500{tmdb_image_path}"
     try:
         logging.info(f"Downloading TMDb image: url={image_url}, destination={local_dest}")
-        # Ensure parent directory exists before writing
         local_dest.parent.mkdir(parents=True, exist_ok=True)
         with requests.get(image_url, stream=True, timeout=15) as r:
             r.raise_for_status()
@@ -198,12 +197,12 @@ def download_tmdb_image(tmdb_image_path: str, local_dest: Path):
     except requests.RequestException as e:
         logging.error(f"Failed to download TMDb image from {image_url}: status_code={getattr(e.response, 'status_code', 'N/A')}, error={e}")
         return False
-# ──────────────────── MEDIA PROBING HELPERS (from main.py) ─────────────────
 
-# These helpers are duplicated from main.py to keep the scanner a standalone utility.
-SAFE_VIDEO_CODECS = {'h264'}
-SAFE_AUDIO_CODECS = {'aac', 'mp3', 'opus'}
-SAFE_AUDIO_CHANNELS = 2
+# ──────────────────── MEDIA PROBING HELPERS (from main.py) ─────────────────
+# These helpers are duplicated from main.py to keep the scanner standalone.
+SAFE_VIDEO_CODECS = {'h264'}  # Browser-safe video codecs
+SAFE_AUDIO_CODECS = {'aac', 'mp3', 'opus'}  # Browser-safe audio codecs
+SAFE_AUDIO_CHANNELS = 2  # Max channels for direct play (stereo)
 
 def probe_media_file(file_path: Path) -> dict:
     """
@@ -214,12 +213,12 @@ def probe_media_file(file_path: Path) -> dict:
         command = [
             'ffprobe', '-v', 'error',
             '-show_entries', 'stream=codec_type,codec_name,channels',
-            '-select_streams', 'v:0,a:0',
             '-of', 'json', str(file_path)
         ]
         result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
         probe_data = json.loads(result.stdout)
         if not probe_data or 'streams' not in probe_data:
+            logging.warning(f"ffprobe returned no stream data for {file_path}")
             return {}
         
         codecs = {}
@@ -228,13 +227,20 @@ def probe_media_file(file_path: Path) -> dict:
             if codec_type == 'video' and 'v' not in codecs:
                 codecs['v'] = stream.get('codec_name')
             elif codec_type == 'audio' and 'a' not in codecs:
+                audio_codec_name = stream.get('codec_name')
+                channels = stream.get('channels')
+                if channels is None:  # Treat missing channels as 6 to force transcode
+                    channels = 6
                 codecs['a'] = {
-                    'name': stream.get('codec_name'),
-                    'channels': stream.get('channels')
+                    'name': audio_codec_name,
+                    'channels': channels
                 }
         return codecs
-    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
-        logging.error(f"ffprobe failed for {file_path}: {e}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"ffprobe failed for {file_path}: {e}, stderr: {e.stderr}")
+        return {}
+    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        logging.error(f"ffprobe error for {file_path}: {e}")
         return {}
 
 def can_direct_play(path: Path) -> bool:
@@ -335,7 +341,6 @@ def _is_noise_dir(name: str) -> bool:
         'mkv', 'mkvCage', 'judas', 'dvdrip', 'cutaways', 'behind the scenes',
         'shorts'
     }
-    # Change to whole-word matching to reduce false positives
     return any(re.search(r'\b' + re.escape(sub) + r'\b', name_lower) for sub in noise_substrings)
 
 def parse_tv_info(path: Path) -> dict | None:
@@ -536,11 +541,12 @@ def scan_movie_file(conn, cursor, file_path, genre_map):
         year = None
         print(f"   ! Could not infer title – using filename as title: \"{title}\"")
 
-    # Probe for technical info
+    # Probe for technical info and log the results for debugging
     codecs = probe_media_file(file_path)
     video_codec = codecs.get('v')
     audio_codec = codecs.get('a', {}).get('name')
     is_direct_play = 1 if can_direct_play(file_path) else 0
+    logging.info(f"Probed codecs for {abs_path}: video_codec={video_codec}, audio_codec={audio_codec}, is_direct_play={is_direct_play}")
 
     # Fetch TMDb info
     metadata = fetch_movie_metadata(title, year)
@@ -551,13 +557,14 @@ def scan_movie_file(conn, cursor, file_path, genre_map):
     release_date = metadata.get("release_date") if metadata else None
     vote_average = metadata.get("vote_average") if metadata else 0
     
-    # Map genre IDs to names
+    # Map genre IDs to names and log
     genres_str = None
     if metadata and genre_map:
         genre_ids = metadata.get("genre_ids", [])
         genre_names = [genre_map.get(gid) for gid in genre_ids if genre_map.get(gid)]
         if genre_names:
             genres_str = ", ".join(genre_names)
+        logging.info(f"Genres for movie {db_title}: {genres_str}")
 
     parent_id = None
     if not metadata:
@@ -568,6 +575,9 @@ def scan_movie_file(conn, cursor, file_path, genre_map):
         ).fetchone()
         if row:
             parent_id = row["id"]
+
+    # Log the final data being stored for debugging
+    logging.info(f"Storing movie data: title={db_title}, filepath={abs_path}, tmdb_id={tmdb_id}, video_codec={video_codec}, audio_codec={audio_codec}, is_direct_play={is_direct_play}")
 
     # --- Insert into database ---
     cursor.execute("""
@@ -702,7 +712,7 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
     # Step 1: Insert/update episode data, but without the still_path for now
     cursor.execute("""
         INSERT INTO episodes
-            (series_id, season, episode, title, overview, filepath, duration_seconds,
+            (series_id, season, episode, title, overview, filepath, duration_seconds, 
              air_date, extra_type)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(filepath) DO UPDATE SET
@@ -711,7 +721,7 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
             overview         = COALESCE(episodes.overview, excluded.overview),
             air_date         = COALESCE(episodes.air_date, excluded.air_date),
             extra_type       = excluded.extra_type
-    """, (series_id, season, episode_num, episode_title, overview, abs_path,
+    """, (series_id, season, episode_num, episode_title, overview, abs_path, 
           duration_seconds, air_date, extra_type if extra else None))
 
     # Step 2: Get the episode's database ID
@@ -755,12 +765,12 @@ def scan_and_update_library(interactive: bool = False):
         for file_path in root_path.rglob("*"):
             if not is_video_file(file_path):
                 continue
-            
             abs_path = str(file_path.resolve())
             if content_type == "movie" and abs_path in known_movies:
-                continue
+                continue  # Skip already indexed movies
             elif content_type == "tv" and abs_path in known_episodes:
-                continue
+                print(f"  Skipping already indexed TV episode: {file_path}")
+                continue  # Skip if already in database
 
             print(f"→ Indexing: {file_path.relative_to(root_path)} ({content_type})")
             if content_type == "movie":
@@ -768,10 +778,9 @@ def scan_and_update_library(interactive: bool = False):
                 new_movie_count += 1
             elif content_type == "tv":
                 if scan_tv_file(conn, cursor, file_path, interactive):
-                    new_tv_count += 1
+                    new_tv_count += 1  # Only increment if successfully added
             else:
                 print(f"  ! Unknown content type '{content_type}', skipping file.")
-            
             time.sleep(0.15)  # Rate limiting for TMDb API
 
     conn.close()
@@ -791,11 +800,11 @@ def _run_unit_tests():
         # New test case for extra detection
         ("K:/tv show/Extras/Season 1 Extras/House MD Season 1 Extra 01 - The Concept.avi", "House MD", 1, 1, True),
         # Deeply-nested extras with noisy series folder name
-        ("K:/tv show/The Office (US) (2005) Season 1-9 S01-S09 (1080p BluRay x265 HEVC 10bit AAC 5.1 Silence)/" +
+        ("K:/tv show/The Office (US) (2005) Season 1-9 S01-S09 (1080p BluRay x265 HEVC 10bit AAC 5.1 Silence)/" + 
          "Featurettes/Featurettes/Season 2/Deleted Scenes/S02E15 Boys and Girls Deleted Scenes.mkv",
          "The Office", 2, 15, True),
         # New test case for Boondocks series with Sxx folder naming
-        ("K:/tv show/The BoonDocks/The.Boondocks.2015.COMPLETE.SERIES.720p.WEBRip.x264-GalaxyTV[TGx]/S01/" +
+        ("K:/tv show/The BoonDocks/The.Boondocks.2015.COMPLETE.SERIES.720p.WEBRip.x264-GalaxyTV[TGx]/S01/" + 
          "The.Boondocks.S01E01.720p.WEBRip.x264-GalaxyTV.mkv", "The Boondocks", 1, 1, False),
         # ─── Bug-fix regression cases ─────────────────────────────────────
         ("K:/tv show/Featurettes/Season 7/A Farewell to Bon Temps.mkv", "True Blood", 7, 1, True),

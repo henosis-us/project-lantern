@@ -1,3 +1,4 @@
+#main.py
 import os
 import math
 import shutil
@@ -142,13 +143,13 @@ def probe_media_file(file_path: str) -> dict:
         command = [
             'ffprobe', '-v', 'error',
             '-show_entries', 'stream=codec_type,codec_name,channels',
-            '-select_streams', 'v:0,a:0',  # Select first video and first audio stream
             '-of', 'json', file_path
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
         probe_data = json.loads(result.stdout)
 
         if not probe_data or 'streams' not in probe_data:
+            logging.warning(f"ffprobe returned no stream data for {file_path}")
             return {}
 
         codecs = {}
@@ -157,14 +158,21 @@ def probe_media_file(file_path: str) -> dict:
             if codec_type == 'video' and 'v' not in codecs:
                 codecs['v'] = stream.get('codec_name')
             elif codec_type == 'audio' and 'a' not in codecs:
+                audio_codec_name = stream.get('codec_name')
+                channels = stream.get('channels')
+                if channels is None:  # Treat missing channels as 6 to force transcode
+                    channels = 6
                 codecs['a'] = {
-                    'name': stream.get('codec_name'),
-                    'channels': stream.get('channels')
+                    'name': audio_codec_name,
+                    'channels': channels
                 }
         return codecs
 
-    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
-        logging.error(f"ffprobe failed for {file_path}: {e}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"ffprobe failed for {file_path}: {e}, stderr: {e.stderr}")
+        return {}
+    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        logging.error(f"ffprobe error for {file_path}: {e}")
         return {}
 
 def can_direct_play(path: str) -> bool:
@@ -341,7 +349,7 @@ class HLSStaticFiles(StaticFiles):
             logging.info(f"[STATIC] {scope['method']} /static/{path} → {resp.status_code}")
         return resp
 
-app.mount("/static", HLSStaticFiles(directory="static"), name="static")  # Updated mount with HLS waiting logic
+app.mount("/static", HLSStaticFiles(directory="static"), name="static")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -415,7 +423,7 @@ def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), _u = Depends(requir
     cur.execute(
         """
         UPDATE movies
-        SET tmdb_id=?, title=?, overview=?, poster_path=?, release_date=?, 
+        SET tmdb_id=?, title=?, overview=?, poster_path=?, release_date, 
             vote_average=?, genres=?, parent_id=NULL
         WHERE id=?
         """,
@@ -434,7 +442,7 @@ def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), _u = Depends(requir
     conn.close()
     return {"status": "ok", "movie_id": movie_id, "tmdb_id": tmdb_id}
 
-# --- New Endpoint for Movie Details ---
+# --- New Endpoint for Movie Details with Logging ---
 @app.get("/library/movies/{movie_id}/details")
 def movie_details(movie_id: int):
     conn = get_db_connection()
@@ -453,9 +461,13 @@ def movie_details(movie_id: int):
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Movie not found")
-
+    
     movie_data = dict(row)
-
+    
+    # Log the fetched data for debugging codec issues
+    logging.info(f"Fetched movie details for ID {movie_id}: {movie_data}")
+    logging.info(f"Video Codec: {movie_data.get('video_codec')}, Audio Codec: {movie_data.get('audio_codec')}")
+    
     # Optional: If overview is NULL and tmdb_id is available, fetch from TMDb and cache in DB
     if movie_data['overview'] is None and movie_data['tmdb_id'] is not None:
         try:
@@ -465,8 +477,9 @@ def movie_details(movie_id: int):
                 conn.execute("UPDATE movies SET overview = ? WHERE id = ?", (overview, movie_id))
                 conn.commit()
                 movie_data['overview'] = overview  # Update the dict in memory
+                logging.info(f"Updated overview for movie ID {movie_id} from TMDb.")
         except Exception as e:
-            print(f"TMDb fetch error for movie {movie_id}: {e}")  # Log error but continue
+            logging.error(f"TMDb fetch error for movie {movie_id}: {e}")  # Log error but continue
     
     conn.close()
     return movie_data
