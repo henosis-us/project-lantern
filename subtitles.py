@@ -21,11 +21,11 @@ def list_local_subtitles(media_id: int, item_type: str = Query(..., enum=["movie
     conn = get_db_connection()
     if item_type == "movie":
         rows = conn.execute("SELECT id, lang, COALESCE(file_name, file_path) AS name FROM subtitles WHERE movie_id = ?", (media_id,)).fetchall()
-        pref = conn.execute("SELECT subtitle_id FROM subtitle_prefs WHERE user_id=? AND movie_id=?", (_user["id"], media_id)).fetchone()
+        pref = conn.execute("SELECT subtitle_id FROM subtitle_prefs WHERE username=? AND movie_id=?", (_user["username"], media_id)).fetchone()
         url_prefix = f"/static/subtitles/movie/{media_id}"
     else:  # episode
         rows = conn.execute("SELECT id, lang, COALESCE(file_name, file_path) AS name FROM episode_subtitles WHERE episode_id = ?", (media_id,)).fetchall()
-        pref = conn.execute("SELECT subtitle_id FROM episode_subtitle_prefs WHERE user_id=? AND episode_id=?", (_user["id"], media_id)).fetchone()
+        pref = conn.execute("SELECT subtitle_id FROM episode_subtitle_prefs WHERE username=? AND episode_id=?", (_user["username"], media_id)).fetchone()
         url_prefix = f"/static/subtitles/episode/{media_id}"
 
     selected_id = pref["subtitle_id"] if pref else None
@@ -143,7 +143,7 @@ def download_subtitle(
         vtt_path = sub_dir / f"{local_sub_id}.vtt"
 
         # 4. Update the row with the final path
-        cursor.execute(f"UPDATE {table} SET file_path = ? WHERE id = ?", (str(vtt_relative_path), local_sub_id))
+        cursor.execute(f"UPDATE {table} SET file_path = ? WHERE id = ?", (vtt_relative_path.as_posix(), local_sub_id))
         conn.commit()
         
         # 5. Download the file and convert
@@ -169,9 +169,9 @@ def download_subtitle(
 def current_subtitle(media_id: int, item_type: str = Query(..., enum=["movie", "episode"]), u=Depends(get_current_user)):
     conn = get_db_connection()
     if item_type == "movie":
-        row = conn.execute("SELECT subtitle_id FROM subtitle_prefs WHERE user_id=? AND movie_id=?", (u["id"], media_id)).fetchone()
+        row = conn.execute("SELECT subtitle_id FROM subtitle_prefs WHERE username=? AND movie_id=?", (u["username"], media_id)).fetchone()
     else:  # episode
-        row = conn.execute("SELECT subtitle_id FROM episode_subtitle_prefs WHERE user_id=? AND episode_id=?", (u["id"], media_id)).fetchone()
+        row = conn.execute("SELECT subtitle_id FROM episode_subtitle_prefs WHERE username=? AND episode_id=?", (u["username"], media_id)).fetchone()
     conn.close()
     return {"subtitle_id": row["subtitle_id"] if row else None}
 
@@ -200,13 +200,13 @@ def select_subtitle(
             raise HTTPException(status_code=404, detail="Subtitle not found or does not belong to this media item.")
 
         cur.execute(f"""
-            INSERT INTO {prefs_table} (user_id, {id_col}, subtitle_id)
+            INSERT INTO {prefs_table} (username, {id_col}, subtitle_id)
             VALUES (?,?,?)
-            ON CONFLICT(user_id, {id_col})
+            ON CONFLICT(username, {id_col})
             DO UPDATE SET subtitle_id=excluded.subtitle_id
-        """, (u["id"], media_id, subtitle_id))
+        """, (u["username"], media_id, subtitle_id))
     else:
-        cur.execute(f"DELETE FROM {prefs_table} WHERE user_id=? AND {id_col}=?", (u["id"], media_id))
+        cur.execute(f"DELETE FROM {prefs_table} WHERE username=? AND {id_col}=?", (u["username"], media_id))
 
     conn.commit()
     conn.close()

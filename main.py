@@ -16,7 +16,7 @@ from starlette.requests import Request
 from database import get_db_connection, initialize_db
 from scanner import scan_and_update_library
 import re
-from auth import get_current_user
+from auth import get_current_user, get_user_from_query
 from history import router as history_router
 from subtitles import router as sub_router
 import logging
@@ -510,7 +510,7 @@ def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), current_user=Depend
     cur = conn.cursor()
     cur.execute("""
         UPDATE movies
-        SET tmdb_id=?, title=?, overview=?, poster_path=?, release_date=,
+        SET tmdb_id=?, title=?, overview=?, poster_path=?, release_date=?,
             vote_average=?, genres=?, parent_id=NULL
         WHERE id=?
     """, (
@@ -529,7 +529,7 @@ def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), current_user=Depend
 
 # Modified Direct-Play Endpoint with Range Support
 @app.get("/direct/{movie_id}")
-def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie"), current_user=Depends(get_current_user)):
+def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie"), current_user=Depends(get_user_from_query)):
     conn = get_db_connection()
     if item_type == "episode":
         row = conn.execute("SELECT filepath FROM episodes WHERE id = ?", (movie_id,)).fetchone()
@@ -633,16 +633,19 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
         if not sub_row:
             raise HTTPException(status_code=404, detail="Subtitle not found for this item.")
         
-        full_sub_path = os.path.join("static", sub_row["file_path"])
+        # The file_path from the DB is already relative to the root, e.g., 'static/subtitles/...'
+        # We just need to join it to the base URL.
+        full_sub_path = sub_row["file_path"]
         if burn:
             force_transcode = True
-            sub_path = full_sub_path
+            # ffmpeg needs an absolute or relative-to-cwd path, not a URL path
+            sub_path = os.path.join(os.getcwd(), full_sub_path)
         else:
-            soft_sub_url = str(request.base_url).rstrip("/") + f"/static/{sub_row['file_path']}"
+            soft_sub_url = str(request.base_url).rstrip("/") + f"/{full_sub_path}"
     
     if not force_transcode and prefer_direct and scale == "source" and can_direct_play(video_path):
-        item_type_param = f"?item_type={item_type}" if item_type == "episode" else ""
-        direct_url = str(request.base_url).rstrip('/') + f"/direct/{movie_id}{item_type_param}"
+        item_type_param = f"&item_type={item_type}" if item_type == "episode" else ""
+        direct_url = str(request.base_url).rstrip('/') + f"/direct/{movie_id}?token={current_user['token']}{item_type_param}"
         return {"mode": "direct", "direct_url": direct_url, "duration_seconds": duration, "soft_sub_url": soft_sub_url}
     
     encode_upto = min(duration, seek_time + 15 * 60) # Limit encoding to 15 mins ahead of seek
@@ -821,7 +824,9 @@ def share_invite(invite_request: dict = Body(..., embed=True), current_user: dic
     # expects `invitee_username`. We also get the `server_unique_id` from the request.
     identity_service_payload = {
         "server_unique_id": invite_request.get("server_unique_id"),
-        "invitee_username": invite_request.get("invitee_identifier")
+        "invitee_username": invite_request.get("invitee_identifier"),
+        "resource_type": "full_access",
+        "resource_id": "*"
     }
 
     # Check for missing data after transformation
