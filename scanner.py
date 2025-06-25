@@ -1,4 +1,4 @@
-#scanner.py
+# scanner.py
 """Lantern – Library Scanner
 Supports scanning multiple roots for movies and TV shows.
 - Movies: same as before, with parent_id grouping.
@@ -25,13 +25,6 @@ from database import get_db_connection
 from difflib import SequenceMatcher
 
 # ────────────────────────── CONFIG ───────────────────────────────────────────
-# Define multiple scan roots with types
-SCAN_ROOTS = [
-    {"path": Path(r"K:\Movies"), "type": "movie"},
-    {"path": Path(r"K:\tv show"), "type": "tv"},
-    # Add more roots as needed, e.g., {"path": Path(r"Z:\AnotherDir"), "type": "movie"}
-]
-
 VIDEO_EXTS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v")
 EXTRAS_DIRS = {"featurettes", "extras", "bonus", "deleted scenes",
                "behind the scenes", "special features", "interview",
@@ -634,7 +627,9 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
             tv_metadata = tmdb_tv_search(show_name, year_hint)
             if tv_metadata:
                 print(f"TMDb match: ID={tv_metadata['id']}, Title='{tv_metadata['name']}', "
-                      f"First Air Date: {tv_metadata.get('first_air_date')}")
+                      f"First Air Date: {tv_metadata.get('first_air_date')}, "
+                      f"Vote Average: {tv_metadata.get('vote_average', 'N/A')}, "
+                      f"Genres: {', '.join([g['name'] for g in tv_metadata.get('genres', [])]) if tv_metadata.get('genres') else 'N/A'}")
                 response = input("Use this TMDb data for the series? (y/n): ").strip().lower()
                 if response != 'y':
                     tv_metadata = None
@@ -647,19 +642,24 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
         else:
             tv_metadata = tmdb_tv_search(show_name, year_hint)
 
-        # Insert new series
+        # Insert new series with additional metadata
         if 'tv_metadata' not in locals() or tv_metadata is None:
             series_title = show_name
             tmdb_id_series = None
             overview = None
             poster_path = None
             first_air_date = None
+            vote_average = 0.0
+            genres_str = None
         else:
             series_title = tv_metadata.get("name") or show_name
             tmdb_id_series = tv_metadata.get("id")
             overview = tv_metadata.get("overview")
             poster_path = tv_metadata.get("poster_path")
             first_air_date = tv_metadata.get("first_air_date")
+            vote_average = tv_metadata.get("vote_average", 0.0)
+            genres_list = [genre['name'] for genre in tv_metadata.get('genres', [])]
+            genres_str = ", ".join(genres_list) if genres_list else None
 
         logging.debug(
             "Attempting to create series: parsed='%s' final_title='%s'",
@@ -667,12 +667,12 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
         )
         try:
             cursor.execute("""
-                INSERT INTO series (title, tmdb_id, overview, poster_path, first_air_date)
-                VALUES (?, ?, ?, ?, ?)
-            """, (series_title, tmdb_id_series, overview, poster_path, first_air_date))
+                INSERT INTO series (title, tmdb_id, overview, poster_path, first_air_date, vote_average, genres)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (series_title, tmdb_id_series, overview, poster_path, first_air_date, vote_average, genres_str))
             conn.commit()
             series_id = cursor.lastrowid
-            # Fix: Update series_row after insertion to enable metadata fetch for the first episode
+            # Fix: Update series_row after insertion
             series_row = {"id": series_id, "tmdb_id": tmdb_id_series}
             logging.debug("Created new series '%s' (id=%s)", series_title, series_id)
         except sqlite3.IntegrityError as e:
@@ -682,17 +682,17 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
                 series_title, e
             )
             row = cursor.execute(
-                "SELECT id FROM series WHERE LOWER(title)=LOWER(?)",
+                "SELECT id, tmdb_id FROM series WHERE LOWER(title)=LOWER(?)",
                 (series_title,)
             ).fetchone()
             if row is None:
                 raise        # this really should not happen
             series_id = row["id"]
-            series_row = {"id": series_id, "tmdb_id": cursor.execute("SELECT tmdb_id FROM series WHERE id=?", (series_id,)).fetchone()["tmdb_id"]}  # Re-fetch tmdb_id
+            series_row = {"id": series_id, "tmdb_id": row["tmdb_id"]}  # Re-fetch tmdb_id
     else:
-        series_id = series_row["id"] # Use existing series
+        series_id = series_row["id"]  # Use existing series
 
-    # Fetch episode metadata from TMDb
+    # Fetch episode metadata from TMDb if series has TMDb ID
     episode_title, air_date, overview, tmdb_still_path = None, None, None, None
     if series_row and series_row["tmdb_id"]:
         season_data = tmdb_season_details(series_row["tmdb_id"], season)
@@ -709,10 +709,10 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
     duration_seconds = get_video_duration(file_path)
     abs_path = str(file_path.resolve())
 
-    # Step 1: Insert/update episode data, but without the still_path for now
+    # Step 1: Insert/update episode data
     cursor.execute("""
         INSERT INTO episodes
-            (series_id, season, episode, title, overview, filepath, duration_seconds, 
+            (series_id, season, episode, title, overview, filepath, duration_seconds,
              air_date, extra_type)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(filepath) DO UPDATE SET
@@ -721,7 +721,7 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
             overview         = COALESCE(episodes.overview, excluded.overview),
             air_date         = COALESCE(episodes.air_date, excluded.air_date),
             extra_type       = excluded.extra_type
-    """, (series_id, season, episode_num, episode_title, overview, abs_path, 
+    """, (series_id, season, episode_num, episode_title, overview, abs_path,
           duration_seconds, air_date, extra_type if extra else None))
 
     # Step 2: Get the episode's database ID
@@ -738,25 +738,32 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
 
 # ──────────────────────── MAIN SCAN FUNCTION ─────────────────────────────────
 def scan_and_update_library(interactive: bool = False):
-    print("\nStarting library scan across all configured roots…")
+    print("\nStarting library scan across all configured libraries…")
     conn = get_db_connection()
     cursor = conn.cursor()
+    cursor.execute("SELECT path, type FROM libraries")  # Query libraries table for scan roots
+    scan_roots = cursor.fetchall()  # Fetch all rows; each is a sqlite3.Row with 'path' and 'type'
+    conn.close()  # Close the database connection after fetching
 
-    # --- Pre-fetch TMDb genre map for efficiency ---
+    # Pre-fetch TMDb genre map for efficiency
     print("Fetching TMDb genre definitions...")
     genre_map = tmdb_get_genre_map()
     if not genre_map:
         print("  ! Warning: Could not fetch genre map. Genre information will not be available for new items.")
 
     # Get all known filepaths for movies and TV episodes
+    conn = get_db_connection()
+    cursor = conn.cursor()
     known_movies = {row["filepath"] for row in cursor.execute("SELECT filepath FROM movies")}
     known_episodes = {row["filepath"] for row in cursor.execute("SELECT filepath FROM episodes")}
-    
+    conn.close()
+
     new_movie_count = 0
     new_tv_count = 0
-    for root_entry in SCAN_ROOTS:
-        root_path = root_entry["path"]
-        content_type = root_entry["type"]
+    for row in scan_roots:  # Iterate over the fetched libraries
+        root_path_str = row['path']
+        content_type = row['type']
+        root_path = Path(root_path_str)  # Convert path to Path object for consistency
         print(f"\nScanning '{root_path}' for {content_type}s…")
         if not root_path.exists():
             print(f"  ! Directory does not exist, skipping: {root_path}")
@@ -774,16 +781,23 @@ def scan_and_update_library(interactive: bool = False):
 
             print(f"→ Indexing: {file_path.relative_to(root_path)} ({content_type})")
             if content_type == "movie":
+                conn = get_db_connection()
+                cursor = conn.cursor()
                 scan_movie_file(conn, cursor, file_path, genre_map)
+                conn.commit()
+                conn.close()
                 new_movie_count += 1
             elif content_type == "tv":
+                conn = get_db_connection()
+                cursor = conn.cursor()
                 if scan_tv_file(conn, cursor, file_path, interactive):
                     new_tv_count += 1  # Only increment if successfully added
+                conn.commit()
+                conn.close()
             else:
                 print(f"  ! Unknown content type '{content_type}', skipping file.")
             time.sleep(0.15)  # Rate limiting for TMDb API
 
-    conn.close()
     total_new = new_movie_count + new_tv_count
     if total_new:
         print(f"\nScan complete – {total_new} new item(s) added ({new_movie_count} movies, {new_tv_count} TV episodes).")

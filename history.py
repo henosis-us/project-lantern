@@ -5,7 +5,6 @@ from auth import get_current_user
 
 router = APIRouter(prefix="/history", tags=["history"])
 
-
 def _get_history_config(item_type: str):
     """Helper to get table and column names based on item_type."""
     if item_type == "movie":
@@ -17,7 +16,6 @@ def _get_history_config(item_type: str):
         raise HTTPException(status_code=400, detail="Invalid item_type.")
 
 # --- MUST BE FIRST: Specific routes before dynamic ones ---
-
 @router.get("/continue/", summary="Get a list of items to continue watching")
 def continue_list(limit: int = 20, u=Depends(get_current_user)):
     """
@@ -25,34 +23,36 @@ def continue_list(limit: int = 20, u=Depends(get_current_user)):
     ordered by the most recently watched.
     """
     conn = get_db_connection()
-
+    # MODIFIED: Get username from the authenticated user object
+    username = u["username"]
+    
     # Movie continue list
     movies = conn.execute("""
         SELECT m.*, w.position_seconds
           FROM watch_history w
           JOIN movies m ON m.id = w.movie_id
-         WHERE w.user_id=?
+         WHERE w.username=?
            AND w.position_seconds < m.duration_seconds * 0.90
       ORDER BY w.updated_at DESC
          LIMIT ?
-    """, (u["id"], limit)).fetchall()
-
+    """, (username, limit)).fetchall()
+    
     # Episode continue list (now includes series poster_path)
     episodes = conn.execute("""
-        SELECT e.*, 
-               s.title AS series_title, 
-               s.id as series_id, 
-               s.poster_path as series_poster_path, 
+        SELECT e.*,
+               s.title AS series_title,
+               s.id as series_id,
+               s.poster_path as series_poster_path,
                w.position_seconds
           FROM watch_history_ep w
           JOIN episodes e ON e.id = w.episode_id
           JOIN series   s ON s.id = e.series_id
-         WHERE w.user_id=?
+         WHERE w.username=?
            AND w.position_seconds < e.duration_seconds * 0.90
       ORDER BY w.updated_at DESC
          LIMIT ?
-    """, (u["id"], limit)).fetchall()
-
+    """, (username, limit)).fetchall()
+    
     conn.close()
     return {
         "movies": [dict(r) for r in movies],
@@ -60,7 +60,6 @@ def continue_list(limit: int = 20, u=Depends(get_current_user)):
     }
 
 # --- Unified CRUD Endpoints for Movies and Episodes (now after /continue) ---
-
 @router.put("/{item_id}", summary="Save watch progress for an item")
 def save_progress(
         item_id: int,
@@ -75,27 +74,27 @@ def save_progress(
     """
     table_name, id_column = _get_history_config(item_type)
     conn = get_db_connection()
-
+    # MODIFIED: Use u["username"] instead of u["id"]
+    username = u["username"]
+    
     finished_cutoff = 0.90
     if duration_seconds and (position_seconds / duration_seconds) >= finished_cutoff:
         conn.execute(
-            f"DELETE FROM {table_name} WHERE user_id=? AND {id_column}=?",
-            (u["id"], item_id)
+            f"DELETE FROM {table_name} WHERE username=? AND {id_column}=?",
+            (username, item_id)
         )
     else:
         conn.execute(f"""
-            INSERT INTO {table_name} (user_id, {id_column}, position_seconds, duration_seconds)
+            INSERT INTO {table_name} (username, {id_column}, position_seconds, duration_seconds)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, {id_column})
+            ON CONFLICT(username, {id_column})
             DO UPDATE SET position_seconds=excluded.position_seconds,
                           duration_seconds=excluded.duration_seconds,
                           updated_at=CURRENT_TIMESTAMP
-        """, (u["id"], item_id, position_seconds, duration_seconds))
-
+        """, (username, item_id, position_seconds, duration_seconds))
     conn.commit()
     conn.close()
     return {"status": "ok"}
-
 
 @router.get("/{item_id}", summary="Get watch progress for an item")
 def get_progress(
@@ -105,15 +104,15 @@ def get_progress(
     """Retrieves the last saved watch position for a movie or episode."""
     table_name, id_column = _get_history_config(item_type)
     conn = get_db_connection()
-
+    # MODIFIED: Use u["username"] instead of u["id"]
+    username = u["username"]
+    
     row = conn.execute(
         f"SELECT position_seconds, duration_seconds FROM {table_name} "
-        f"WHERE user_id=? AND {id_column}=?", (u["id"], item_id)
+        f"WHERE username=? AND {id_column}=?", (username, item_id)
     ).fetchone()
-
     conn.close()
     return dict(row) if row else {}
-
 
 @router.delete("/{item_id}", summary="Clear watch progress for an item")
 def clear_progress(
@@ -123,12 +122,13 @@ def clear_progress(
     """Deletes the watch history for a specific movie or episode."""
     table_name, id_column = _get_history_config(item_type)
     conn = get_db_connection()
-
+    # MODIFIED: Use u["username"] instead of u["id"]
+    username = u["username"]
+    
     conn.execute(
-        f"DELETE FROM {table_name} WHERE user_id=? AND {id_column}=?",
-        (u["id"], item_id)
+        f"DELETE FROM {table_name} WHERE username=? AND {id_column}=?",
+        (username, item_id)
     )
-
     conn.commit()
     conn.close()
     return {"status": "ok"}

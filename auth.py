@@ -1,99 +1,51 @@
 # auth.py
-import os, datetime, sqlite3
-from typing import Optional
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-from fastapi import HTTPException, status, Depends, APIRouter, Form  # Added APIRouter and Form
+from fastapi import HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer
-from database import get_db_connection
+import requests
+from database import get_db_connection  # Import to access server_config
+import sqlite3
 
-JWT_SECRET        = os.getenv("JWT_SECRET",  "super-secret-change-me")
-JWT_ALGORITHM     = "HS256"
-JWT_EXPIRE_MIN    = int(os.getenv("JWT_EXPIRE_MIN", "1440"))   # 24 h default
+# OAuth2 scheme for token dependency, pointing to Identity Service login endpoint
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="http://localhost:8001/auth/login") #"https://lantern.henosis.us/api/auth/login"
 
-pwd_ctx           = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme     = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
-# ──────────────────── basic user helpers ────────────────────
-def hash_pw(password: str) -> str:
-    return pwd_ctx.hash(password)
-
-def verify_pw(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
-
-def get_user(username: str) -> Optional[sqlite3.Row]:
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    """
+    Rewritten dependency to validate the user token against the remote Identity Service.
+    It fetches the server_unique_id from the local database and sends it along with the token
+    to the Identity Service for validation.
+    """
+    # Fetch server_unique_id from local database
     conn = get_db_connection()
-    row  = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    conn.close()
-    return row
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM server_config WHERE key = 'server_unique_id'")
+    row = cursor.fetchone()
+    conn.close()  # Close connection early to avoid leaks
 
-# ──────────────────── JWT helpers ───────────────────────────
-def create_access_token(data: dict, expires_minutes: int = JWT_EXPIRE_MIN):
-    to_encode           = data.copy()
-    expire              = datetime.datetime.utcnow() + datetime.timedelta(minutes=expires_minutes)
-    to_encode["exp"]    = expire
-    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    if not row:
+        raise HTTPException(status_code=500, detail="Server not configured with unique ID")
 
-def decode_token(token: str) -> dict:
+    server_unique_id = row['value']
+
+    # Call Identity Service to validate the token
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Invalid or expired token",
-                            headers={"WWW-Authenticate": "Bearer"})
+        response = requests.post(
+            "http://localhost:8001/auth/validate", #"https://lantern.henosis.us/api/auth/validate"
+            json={"token": token, "server_unique_id": server_unique_id},
+            timeout=10  # Add a timeout to avoid hanging requests
+        )
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        result = response.json()
 
-# ──────────────────── FastAPI dependency ────────────────────
-def get_current_user(token: str = Depends(oauth2_scheme)) -> sqlite3.Row:
-    payload = decode_token(token)
-    username = payload.get("sub")
-    if username is None:
-        raise HTTPException(status_code=401, detail="Malformed token")
-    user = get_user(username)
-    if user is None:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user
-
-# ──────────────────── public service functions ─────────────────────────
-router = APIRouter(prefix="/auth", tags=["auth"])
-
-def create_user(username: str, password: str, *, is_admin: bool = False):
-    if get_user(username):
-        raise HTTPException(status_code=409, detail="User already exists")
-
-    pw_hash = hash_pw(password)
-    conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO users (username, password_hash, is_admin) VALUES (?,?,?)",
-        (username, pw_hash, int(is_admin)),
-    )
-    conn.commit()
-    conn.close()
-
-def authenticate(username: str, password: str):
-    user = get_user(username)
-    if not user or not verify_pw(password, user["password_hash"]):
-        return None
-    return user
-
-# ──────────────────── FastAPI end-points ───────────────────────────────
-@router.post("/register")
-def register(username: str = Form(...), password: str = Form(...)):
-    """
-    Create a user account.  On an empty DB the very first account is
-    automatically flagged is_admin=1 (useful for boot-strapping).
-    """
-    first_user = get_db_connection().execute("SELECT 1 FROM users LIMIT 1").fetchone() is None
-    create_user(username, password, is_admin=first_user)
-    return {"msg": "account created", "admin": bool(first_user)}
-
-@router.post("/login")
-def login(username: str = Form(...), password: str = Form(...)):
-    user = authenticate(username, password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_access_token({"sub": user["username"]})
-    return {"access_token": token, "token_type": "bearer"}
-
-@router.get("/me")
-def me(current=Depends(get_current_user)):
-    return {"username": current["username"], "is_admin": bool(current["is_admin"])}
+        if result.get("is_valid"):
+            # Return the user object from the Identity Service response
+            # Assuming the response includes user details like username; adjust if needed
+            return result  # e.g., {"is_valid": true, "username": "user", ...}
+        else:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token or unauthorized access")
+    
+    except requests.RequestException as e:
+        # Handle network or Identity Service errors
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Identity Service error: {str(e)}")
+    except Exception as e:
+        # Catch any other unexpected errors
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
