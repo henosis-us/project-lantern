@@ -112,6 +112,17 @@ def tmdb_details(tmdb_id: int):
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"TMDb details error: {e}")
 
+def get_public_ip():
+    """Fetches the public IP address from an external service."""
+    try:
+        # Use a reliable and simple service to get the IP
+        response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        return response.json()['ip']
+    except requests.RequestException as e:
+        logging.warning(f"Could not fetch public IP: {e}. Falling back to localhost.")
+        return None
+
 def generate_vod_manifest(duration_seconds: int):
     num_segments = math.ceil(duration_seconds / SEGMENT_DURATION_SEC)
     manifest_lines = [
@@ -274,6 +285,17 @@ async def lifespan(app: FastAPI):
         shutil.rmtree(hls_base_dir)
     os.makedirs(hls_base_dir, exist_ok=True)
     initialize_db()
+
+    # NEW: Get public IP and construct the public URL
+    public_ip = get_public_ip()
+    port = os.getenv("LMS_PORT", 8000)
+    global LMS_PUBLIC_URL
+    if public_ip:
+        LMS_PUBLIC_URL = f"http://{public_ip}:{port}"
+        print(f"Public IP detected: {public_ip}. Public URL set to: {LMS_PUBLIC_URL}")
+    else:
+        print(f"Could not determine public IP. Using configured LMS_PUBLIC_URL: {LMS_PUBLIC_URL}")
+
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -746,6 +768,25 @@ def list_episodes(series_id: int, season: Optional[int] = None, current_user=Dep
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+@app.get("/server/claim-info")
+def get_claim_info():
+    """Provides the necessary information for a client to claim this server."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM server_config WHERE key = 'claim_token'")
+    claim_token_row = cursor.fetchone()
+    conn.close()
+    claim_token = claim_token_row['value'] if claim_token_row else None
+
+    if not claim_token:
+        raise HTTPException(status_code=404, detail="Claim token not available. The server may have already been claimed.")
+
+    return {
+        "server_url": LMS_PUBLIC_URL,
+        "claim_token": claim_token
+    }
+
 
 # NEW ENDPOINTS
 @app.get("/server/status", response_model=dict)
