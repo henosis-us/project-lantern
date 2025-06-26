@@ -4,10 +4,12 @@ import math
 import shutil
 import time
 import asyncio
+from typing import Optional
 from fastapi.responses import StreamingResponse
 import subprocess
 import mimetypes
 import requests
+import sqlite3
 from fastapi import FastAPI, HTTPException, Response, BackgroundTasks, Body, Query, Header, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware  # <-- Import CORSMiddleware
@@ -90,7 +92,7 @@ RESOLUTION_PRESETS = {
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "eadf04bca50ce347da06fffecca64e8a")
 TMDB_BASE = "https://api.themoviedb.org/3"
 
-def tmdb_search(query: str, year: str | None = None):
+def tmdb_search(query: str, year: Optional[str] = None):
     params = {"api_key": TMDB_API_KEY, "query": query}
     if year:
         params["year"] = year
@@ -202,12 +204,11 @@ def range_streamer(file_path, start, end, size):
             yield data
             remaining -= len(data)
 
-def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_time: float, end_time: float, crf: int, scaling_filter: list, burn_sub_path: str | None = None):
+def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_time: float, end_time: float, crf: int, scaling_filter: list, burn_sub_path: Optional[str] = None):
     global active_processes
     seek_args = []
     if seek_time > 1:
         seek_args = ['-ss', str(seek_time), '-avoid_negative_ts', 'make_zero']
-    
     # Dynamic Audio Transcoding Logic using probe_media_file
     codecs = probe_media_file(video_path)
     audio_info = codecs.get('a', {})
@@ -222,7 +223,6 @@ def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_ti
         bitrate = f"{128 * (target_channels // 2)}k"
         logging.info(f"Audio for {movie_id}: Transcoding to {target_channels}-channel AAC at {bitrate}.")
         audio_args = ['-c:a', 'aac', '-b:a', bitrate, '-ac', str(target_channels)]
-    
     keyframe_args = [
         '-force_key_frames', f"expr:gte(t,n_forced*{SEGMENT_DURATION_SEC})",
         '-g', str(int(SEGMENT_DURATION_SEC * 24)),
@@ -231,7 +231,6 @@ def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_ti
     subs_filter = []
     if burn_sub_path:
         subs_filter = ["-vf", f"subtitles={burn_sub_path}"]
-    
     ffmpeg_command = [
         'ffmpeg', *seek_args, '-to', str(end_time), '-i', video_path,
         *subs_filter,
@@ -246,7 +245,6 @@ def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_ti
         '-segment_start_number', '0',
         '-sc_threshold', '0', 'stream%d.ts'
     ]
-    
     os.makedirs("logs", exist_ok=True)
     log_file_path = os.path.join(os.getcwd(), f"logs/ffmpeg_{movie_id}.log")
     log_mode = "a" if seek_time > 1 else "w"
@@ -263,7 +261,6 @@ def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_ti
             logging.error(f"FFmpeg failed to start for movie {movie_id}: {e}")
             if movie_id in active_processes:
                 del active_processes[movie_id]
-    
     if movie_id in active_processes:
         del active_processes[movie_id]
     logging.info(f"FFmpeg process for movie {movie_id} (seek time {seek_time:.2f}s) has finished.")
@@ -300,16 +297,20 @@ async def lifespan(app: FastAPI):
         expires_at = claim_token_data.get("expires_at")
         
         # Store the token in the DB for reference
-        cursor.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('claim_token', ?)", (claim_token,))
-        conn.commit()
+        try:
+            cursor.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('claim_token', ?)", (claim_token,))
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            print(f"!!! DATABASE ERROR !!!: Could not save claim token to the database.")
+            print(f"Reason: {e}")
 
         # Print clear, copy-paste friendly instructions for the user
-        print("\n" + "="*50)
-        print("🚀 Your Lantern Media Server is running!")
-        print("To link this server to your account, enter the following details in the web UI:")
-        print(f"  - Server URL:    {LMS_PUBLIC_URL}")
-        print(f"  - Claim Token:   {claim_token}")
-        print("="*50 + "\n")
+        print("\n" + "="*50, flush=True)
+        print("🚀 Your Lantern Media Server is running!", flush=True)
+        print("To link this server to your account, enter the following details in the web UI:", flush=True)
+        print(f"  - Server URL:    {LMS_PUBLIC_URL}", flush=True)
+        print(f"  - Claim Token:   {claim_token}", flush=True)
+        print("="*50 + "\n", flush=True)
 
     except requests.RequestException as e:
         print("\n--- !!! CRITICAL STARTUP ERROR !!! ---")
@@ -318,8 +319,8 @@ async def lifespan(app: FastAPI):
         print(f"Is the Identity Service running at {IDENTITY_SERVICE_URL}?")
         print("--------------------------------------\n")
         logging.error(f"Failed to generate claim token from Identity Service: {e}")
-    
-    conn.close()
+    finally:
+        conn.close()
 
     # NEW: Send one heartbeat immediately on startup, then start the periodic task
     print(f"Sending initial heartbeat for server {server_unique_id} with URL {LMS_PUBLIC_URL}")
@@ -372,7 +373,7 @@ app = FastAPI(title="Project Lantern", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",  # Your local React dev server origin
+        "http://localhost:5173",  # Your local React dev server
         "https://lantern.henosis.us" # Your production frontend origin
     ],
     allow_credentials=True,
@@ -488,7 +489,7 @@ def series_details(series_id: int, current_user=Depends(get_current_user)):
     return series_data
 
 @app.get("/tmdb/search")
-def proxy_tmdb_search(q: str, year: str | None = None, current_user=Depends(get_current_user)):
+def proxy_tmdb_search(q: str, year: Optional[str] = None, current_user=Depends(get_current_user)):
     try:
         results = tmdb_search(q, year)
         return results
@@ -583,7 +584,7 @@ def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie
         )
 
 @app.get("/stream/{movie_id}")
-async def start_stream(request: Request, movie_id: int, seek_time: float = 0, prefer_direct: bool = Query(False), force_transcode: bool = Query(False), quality: str = Query("medium"), scale: str = Query("source"), subtitle_id: int | None = Query(None), burn: bool = Query(False), item_type: str = Query("movie"), current_user=Depends(get_current_user)):
+async def start_stream(request: Request, movie_id: int, seek_time: float = 0, prefer_direct: bool = Query(False), force_transcode: bool = Query(False), quality: str = Query("medium"), scale: str = Query("source"), subtitle_id: Optional[int] = Query(None), burn: bool = Query(False), item_type: str = Query("movie"), current_user=Depends(get_current_user)):
     global active_processes
     
     if movie_id in active_processes:
@@ -592,7 +593,7 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
         proc = proc_info.get("process")
         if proc:
             proc.terminate()
-    
+            
     conn = get_db_connection()
     if item_type == "episode":
         item = conn.execute("SELECT filepath, duration_seconds FROM episodes WHERE id = ?", (movie_id,)).fetchone()
@@ -725,7 +726,7 @@ def list_series(current_user=Depends(get_current_user)):
     return [dict(r) for r in rows]
 
 @app.get("/library/series/{series_id}/episodes")
-def list_episodes(series_id: int, season: int | None = None, current_user=Depends(get_current_user)):
+def list_episodes(series_id: int, season: Optional[int] = None, current_user=Depends(get_current_user)):
     cols = (
         "id, season, episode, title, overview, duration_seconds, "
         "air_date, extra_type, still_path"

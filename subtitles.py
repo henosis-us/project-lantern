@@ -1,5 +1,6 @@
 # subtitles.py
 """FastAPI router for all subtitle-related operations:- Listing locally cached subtitles.- Searching for new subtitles on OpenSubtitles.- Downloading and caching selected subtitles."""
+from typing import Optional
 from pathlib import Path
 from fastapi import APIRouter, Depends, Body, HTTPException, status, Query
 from auth import get_current_user
@@ -179,7 +180,7 @@ def current_subtitle(media_id: int, item_type: str = Query(..., enum=["movie", "
 def select_subtitle(
     media_id: int,
     item_type: str = Query(..., enum=["movie", "episode"]),
-    subtitle_id: int | None = Body(None, embed=True),
+    subtitle_id: Optional[int] = Body(None, embed=True),
     u = Depends(get_current_user)
 ):
     conn = get_db_connection()

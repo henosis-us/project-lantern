@@ -21,6 +21,7 @@ import requests
 import logging
 import argparse
 import sys
+from typing import Optional
 from database import get_db_connection
 from difflib import SequenceMatcher
 
@@ -336,7 +337,7 @@ def _is_noise_dir(name: str) -> bool:
     }
     return any(re.search(r'\b' + re.escape(sub) + r'\b', name_lower) for sub in noise_substrings)
 
-def parse_tv_info(path: Path) -> dict | None:
+def parse_tv_info(path: Path) -> Optional[dict]:
     """Parse TV show episode info from path. Return None if not TV-like."""
     filename = path.name.lower()
 
