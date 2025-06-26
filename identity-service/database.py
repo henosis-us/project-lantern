@@ -1,50 +1,15 @@
 # database.py (for Identity Service - PostgreSQL)
 import os
-import sqlalchemy # NEW: Import sqlalchemy for text() and UniqueConstraint
+import sqlalchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime, Uuid
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from sqlalchemy.sql import func
 from dotenv import load_dotenv
-from urllib.parse import urlparse, urlunparse # NEW: For parsing DB URL
 
 load_dotenv()
 
-# It's recommended to use environment variables for connection details
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost/lantern_identity")
 
-# --- Function to ensure database exists ---
-def ensure_database_exists(db_url):
-    parsed_url = urlparse(db_url)
-    db_name = parsed_url.path.lstrip('/') # Get database name from the path part of the URL
-        
-    # Construct a URL for connecting to the default 'postgres' database
-    # This assumes the user specified in DATABASE_URL has access to the 'postgres' database
-    default_db_url = urlunparse(parsed_url._replace(path='/postgres'))
-    
-    # Temporary engine to connect to 'postgres' database
-    # The `isolation_level="AUTOCOMMIT"` is crucial for CREATE DATABASE as it cannot run within a transaction
-    temp_engine = create_engine(default_db_url, isolation_level="AUTOCOMMIT")
-        
-    try:
-        with temp_engine.connect() as connection:
-            # Check if the target database exists
-            # Use sqlalchemy.text() for raw SQL queries
-            result = connection.execute(sqlalchemy.text(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'"))
-            if not result.scalar():
-                # If not, create it
-                print(f"Database '{db_name}' does not exist. Creating it now...")
-                connection.execute(sqlalchemy.text(f"CREATE DATABASE {db_name}"))
-                print(f"Database '{db_name}' created successfully.")
-            else:
-                print(f"Database '{db_name}' already exists.")
-    except Exception as e:
-        print(f"Error ensuring database '{db_name}' exists: {e}")
-        print("Please ensure your PostgreSQL server is running and the user specified in DATABASE_URL has permissions to connect to 'postgres' database and create new databases.")
-        raise # Re-raise the exception to stop the application startup
-
-# Ensure the database exists BEFORE creating the main engine for the specific database.
-# This makes sure the target database is ready before SQLAlchemy tries to connect to it for table creation.
-ensure_database_exists(DATABASE_URL)
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
