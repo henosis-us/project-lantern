@@ -1,0 +1,1823 @@
+/* index.css - Updated with better styling for TV support */
+:root {  
+  --player-height: 550px;
+}
+
+body {  
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;  
+  background-color: #121212;  
+  color: #eee;  
+  margin: 0;  
+  padding: 20px;  
+  padding-bottom: 80px;
+}
+
+.header {  
+  display: flex;  
+  flex-wrap: wrap;  
+  gap: 10px;  
+  justify-content: space-between;  
+  align-items: center;  
+  margin-bottom: 20px;
+}
+
+.header h1 {  
+  color: #f5f5f5;  
+  margin: 0;  
+  cursor: pointer;
+}
+
+/* --- New Header Navigation Styles --- */
+.header-nav {  
+  display: flex;  
+  gap: 10px;  
+  align-items: center;  
+  flex-grow: 1;  
+  padding-left: 25px;
+}
+
+.header-nav button {  
+  background: none;  
+  border: none;  
+  color: #aaa;  
+  font-size: 16px;  
+  font-weight: 500;  
+  padding: 8px 12px;  
+  cursor: pointer;  
+  position: relative;  
+  transition: color 0.3s ease;
+}
+
+.header-nav button:hover {  
+  color: #fff;
+}
+
+.header-nav button.active {  
+  color: #fff;  
+  font-weight: 600;
+}
+
+.header-nav button.active::after {  
+  content: '';  
+  position: absolute;  
+  bottom: -2px;  
+  left: 10px;  
+  right: 10px;  
+  height: 3px;  
+  background-color: #007bff;  
+  border-radius: 2px;
+}
+
+.header button {  
+  background-color: #007bff;  
+  color: white;  
+  border: none;  
+  padding: 10px 15px;  
+  border-radius: 5px;  
+  cursor: pointer;  
+  font-size: 14px;  
+  transition: background-color 0.3s, transform 0.1s;
+}
+
+.header button:hover {  
+  background-color: #0056b3;  
+  transform: scale(1.05);
+}
+
+.header button.active {  
+  background-color: #0d6efd;  
+  font-weight: 600;
+}
+
+#search-input {  
+  flex: 1 1 250px;  
+  min-width: 200px;  
+  max-width: 400px;  
+  background-color: #1f1f1f;  
+  border: 1px solid #333;  
+  border-radius: 5px;  
+  padding: 9px 12px;  
+  color: #eee;  
+  font-size: 15px;
+}
+
+#search-input::placeholder {  
+  color: #777;
+}
+
+/* --- Styles for Continue Watching Row --- */
+.continue-row {  
+  background-color: #1a1a1a;  
+  border-radius: 8px;  
+  padding: 20px;  
+  margin-bottom: 40px;  
+  position: relative;
+}
+
+.continue-row h2 {  
+  text-align: left;  
+  font-size: 20px;  
+  margin: 0 0 15px 0;  
+  font-weight: 600;
+}
+
+.movie-row {  
+  display: flex;  
+  gap: 20px;  
+  overflow-x: auto;  
+  overflow-y: hidden;  
+  padding-bottom: 15px;  
+  scrollbar-width: thin;  
+  scrollbar-color: #555 #1f1f1f;  
+  scroll-behavior: smooth;  
+  -webkit-overflow-scrolling: touch;
+}
+
+.movie-row::-webkit-scrollbar {  
+  height: 8px;
+}
+
+.movie-row::-webkit-scrollbar-track {  
+  background: transparent;
+}
+
+.movie-row::-webkit-scrollbar-thumb {  
+  background-color: #555;  
+  border-radius: 4px;
+}
+
+.movie-row::-webkit-scrollbar-thumb:hover {  
+  background-color: #777;
+}
+
+/* Visual cue for horizontal scrolling (fade-out gradient) */
+.continue-row::after {  
+  content: '';  
+  position: absolute;  
+  top: 55px; /* Position below the h2 title */  
+  right: 0;  
+  bottom: 0;  
+  width: 60px;  
+  background: linear-gradient(to left, #1a1a1a, transparent);  
+  pointer-events: none;  
+  z-index: 2;
+}
+
+/* Force cards in the horizontal row to a fixed width and add wrapper for progress bar */
+.movie-row .movie-item-wrapper {  
+  position: relative;  
+  flex-shrink: 0;  
+  width: 180px; /* Match the width of movie items */
+}
+
+.progress-overlay {  
+  position: absolute;  
+  bottom: 0;  
+  left: 0;  
+  width: 100%;  
+  height: 5px;  
+  background-color: rgba(90, 90, 90, 0.7);  
+  border-bottom-left-radius: 8px;  
+  border-bottom-right-radius: 8px;  
+  overflow: hidden;  
+  pointer-events: none;
+}
+
+.progress-bar-inner {  
+  height: 100%;  
+  background-color: #007bff;  
+  border-radius: 0;
+}
+
+/* --- End Continue Watching Styles --- */
+
+#library {  
+  display: grid;  
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));  
+  gap: 20px;  
+  transition: opacity 0.3s;
+}
+
+#library.loading {  
+  opacity: 0.3;  
+  pointer-events: none;
+}
+
+.movie-item {  
+  cursor: pointer;  
+  background-color: #222;  
+  border-radius: 8px;  
+  overflow: hidden;  
+  text-align: center;  
+  transition: transform 0.2s;  
+  display: flex;  
+  flex-direction: column;  
+  position: relative;
+}
+
+.movie-item:hover {  
+  transform: scale(1.05);  
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3); /* Improved hover shadow */
+}
+
+.movie-item img {  
+  width: 100%;  
+  display: block;  
+  background-color: #333;
+}
+
+.movie-item-info {  
+  padding: 10px;  
+  flex-grow: 1;  
+  display: flex;  
+  flex-direction: column;  
+  justify-content: space-between;
+}
+
+.movie-item-info p {  
+  margin: 0;  
+  font-size: 14px;  
+  white-space: nowrap;  
+  overflow: hidden;  
+  text-overflow: ellipsis;
+}
+
+.movie-item-info .duration {  
+  font-size: 12px;  
+  color: #aaa;  
+  margin-top: 4px;
+}
+
+.badge {  
+  background: #007bff;  
+  color: #fff;  
+  font-size: 11px;  
+  padding: 2px 6px;  
+  border-radius: 4px;  
+  margin-left: 4px;
+}
+
+#player-wrapper {  
+  position: fixed;  
+  top: 0;  
+  left: 0;  
+  width: 100%;  
+  height: 100%;  
+  background-color: rgba(0, 0, 0, 0.85);  
+  display: none;  
+  justify-content: center;  
+  align-items: center;  
+  z-index: 1000;
+}
+
+.active-label {  
+  color: #0d6efd;  
+  font-weight: 600;  
+  margin-left: 8px;
+}
+
+button.active {  
+  color: #0d6efd;
+}
+
+#player-wrapper.active {  
+  display: flex;
+}
+
+#player-container {  
+  position: relative;  
+  background-color: #000;  
+  border-radius: 8px;  
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);  
+  width: 90vw;  
+  height: 90vh;  
+  max-width: 1800px;  
+  display: flex;  
+  flex-direction: column;
+}
+
+#player-header {  
+  display: flex;  
+  justify-content: space-between;  
+  align-items: center;  
+  padding: 10px 15px;  
+  background-color: #1a1a1a;  
+  border-top-left-radius: 8px;  
+  border-top-right-radius: 8px;
+}
+
+#now-playing-title {  
+  font-size: 16px;  
+  margin: 0;  
+  flex-grow: 1;  
+  white-space: nowrap;  
+  overflow: hidden;  
+  text-overflow: ellipsis;
+}
+
+.player-controls button {  
+  background: none;  
+  border: none;  
+  color: #ccc;  
+  font-size: 18px;  
+  cursor: pointer;  
+  padding: 5px;  
+  transition: color 0.3s, transform 0.1s;
+}
+
+.player-controls button:hover {  
+  color: #fff;  
+  transform: scale(1.1);
+}
+
+#video-area {  
+  position: relative;  
+  background-color: #000;  
+  flex-grow: 1;  
+  min-height: 0;  
+  border-bottom-left-radius: 8px;  
+  border-bottom-right-radius: 8px;
+}
+
+video {  
+  width: 100%;  
+  height: 100%;  
+  display: block;  
+  border-bottom-left-radius: 8px;  
+  border-bottom-right-radius: 8px;  
+  object-fit: contain;
+}
+
+.progress-container {  
+  position: absolute;  
+  bottom: 55px;  
+  left: 10px;  
+  right: 10px;  
+  height: 5px;  
+  pointer-events: none;
+}
+
+progress.buffer-bar {  
+  width: 100%;  
+  height: 100%;  
+  appearance: none;  
+  -webkit-appearance: none;  
+  background: rgba(255, 255, 255, 0.2);
+}
+
+progress.buffer-bar::-webkit-progress-bar {  
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+progress.buffer-bar::-webkit-progress-value {  
+  background-color: rgba(255, 255, 255, 0.4);  
+  transition: width 0.2s linear;
+}
+
+progress.buffer-bar::-moz-progress-bar {  
+  background-color: rgba(255, 255, 255, 0.4);
+}
+
+.seek-container {  
+  position: absolute;  
+  bottom: 15px;  
+  left: 10px;  
+  right: 10px;
+}
+
+#seek-slider {  
+  width: 100%;  
+  cursor: pointer;  
+  background: transparent;  
+  height: 6px;  
+  appearance: none;  
+  -webkit-appearance: none;  
+  outline: none; /* Remove default outline for better look */
+}
+
+#seek-slider::-webkit-slider-runnable-track {  
+  height: 6px;  
+  background: #444;  
+  border-radius: 3px;
+}
+
+#seek-slider::-webkit-slider-thumb {  
+  -webkit-appearance: none;  
+  width: 14px;  
+  height: 14px;  
+  background: #007bff;  
+  border-radius: 50%;  
+  margin-top: -4px;  
+  transition: background 0.3s;
+}
+
+#seek-slider::-webkit-slider-thumb:hover {  
+  background: #0d6efd;
+}
+
+#seek-slider::-moz-range-track {  
+  height: 6px;  
+  background: #444;  
+  border-radius: 3px;
+}
+
+#seek-slider::-moz-range-thumb {  
+  width: 14px;  
+  height: 14px;  
+  background: #007bff;  
+  border: none;  
+  border-radius: 50%;  
+  transition: background 0.3s;
+}
+
+#seek-slider::-moz-range-thumb:hover {  
+  background: #0d6efd;
+}
+
+#mini-player {  
+  position: fixed;  
+  bottom: -100px;  
+  left: 0;  
+  width: 100%;  
+  background-color: #1f1f1f;  
+  z-index: 1001;  
+  display: flex;  
+  align-items: center;  
+  padding: 10px 20px;  
+  box-shadow: 0 -5px 15px rgba(0, 0, 0, 0.3);  
+  transition: all 0.3s ease-in-out;  
+  opacity: 0;  
+  visibility: hidden;
+}
+
+body.player-minimized #mini-player {  
+  bottom: 0;  
+  opacity: 1;  
+  visibility: visible;
+}
+
+body.player-minimized #player-wrapper {  
+  pointer-events: none;  
+  opacity: 0;
+}
+
+#mini-player-title {  
+  flex-grow: 1;  
+  margin: 0;  
+  font-size: 14px;
+}
+
+#mini-player button {  
+  margin-left: 15px;
+}
+
+#status-message {  
+  text-align: center;  
+  font-size: 18px;  
+  color: #888;  
+  margin-top: 50px;
+}
+
+.loader {  
+  border: 5px solid #f3f3f3;  
+  border-top: 5px solid #007bff;  
+  border-radius: 50%;  
+  width: 50px;  
+  height: 50px;  
+  animation: spin 1s linear infinite;  
+  position: absolute;  
+  top: 50%;  
+  left: 50%;  
+  margin-top: -25px;  
+  margin-left: -25px;  
+  z-index: 5;
+}
+
+#video-area .loader {  
+  display: none;
+}
+
+/* --- Improved Group Modal Styles --- */
+/* --- START: New Movie Details Modal Styles --- */
+#movie-details-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  opacity: 0;
+  transition: opacity 0.2s ease-in-out;
+  animation: modal-fade-in 0.3s forwards;
+}
+
+#movie-details-modal.active {
+  opacity: 1;
+}
+
+@keyframes modal-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.modal-content-wrapper {
+  background-color: #1c1c1c;
+  color: #eee;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+  width: 90%;
+  max-width: 900px;
+  max-height: 90vh;
+  overflow-y: auto;
+  position: relative;
+  padding: 2.5rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-content-wrapper .loader {
+  border-top-color: #007bff;
+  position: relative;
+  margin: 40px auto;
+}
+
+.modal-content-wrapper .close-btn {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  background: rgba(40, 40, 40, 0.8);
+  border: 1px solid #444;
+  color: #ccc;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.modal-content-wrapper .close-btn:hover {
+  background-color: #333;
+  color: #fff;
+  transform: scale(1.1);
+}
+
+.details-content {
+  display: flex;
+  gap: 2.5rem;
+}
+
+.details-poster {
+  flex-shrink: 0;
+  width: 250px;
+}
+
+.details-poster img {
+  width: 100%;
+  border-radius: 8px;
+  background-color: #333;
+}
+
+.details-info {
+  flex-grow: 1;
+  min-width: 0; /* Prevents text overflow issues in flexbox */
+}
+
+.details-info h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  margin: 0 0 1rem 0;
+  color: #f5f5f5;
+}
+
+.details-info h1 .year {
+  color: #aaa;
+  font-weight: 400;
+  margin-left: 0.5rem;
+}
+
+.details-info h3 {
+  font-size: 1.2rem;
+  margin: 2rem 0 1rem 0;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #333;
+}
+
+.meta-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 1.5rem;
+}
+
+.meta-badge {
+  background-color: #333;
+  color: #ccc;
+  padding: 5px 10px;
+  border-radius: 15px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.meta-badge.rating {
+  background-color: #e6b400;
+  color: #121212;
+  font-weight: 700;
+}
+
+.overview {
+  font-size: 1rem;
+  line-height: 1.6;
+  color: #ccc;
+}
+
+.versions-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.versions-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #2a2a2a;
+  padding: 10px 15px;
+  border-radius: 6px;
+}
+
+.versions-list li button {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.2s ease;
+}
+
+.versions-list li button:hover {
+  background-color: #0056b3;
+}
+
+.owner-actions {
+  margin-top: 2rem;
+}
+
+.info-toggle-btn {
+  background: #3a3a3a;
+  color: #ddd;
+  border: 1px solid #555;
+  padding: 8px 16px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.info-toggle-btn:hover {
+  background: #4a4a4a;
+}
+
+.info-panel {
+  margin-top: 1.5rem;
+  padding: 1.5rem;
+  background-color: #161616;
+  border-radius: 8px;
+  border: 1px solid #333;
+  animation: panel-fade-in 0.4s ease;
+}
+
+@keyframes panel-fade-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.info-panel h3 {
+  margin-top: 0;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #444;
+}
+
+.tech-details p {
+  margin: 8px 0;
+  font-size: 0.9rem;
+  color: #bbb;
+}
+
+.tech-details code {
+  background-color: #2b2b2b;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.stream-status {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: bold;
+  font-size: 0.8rem;
+  margin-left: 8px;
+}
+
+.stream-status.direct-play {
+  background-color: #28a745; /* Green */
+  color: white;
+}
+
+.stream-status.transcode {
+  background-color: #fd7e14; /* Orange */
+  color: white;
+}
+
+.admin-actions {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #333;
+}
+
+.admin-actions button {
+  background: #007bff;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+/* --- END: New Movie Details Modal Styles --- */
+
+#group-modal.active {  
+  display: flex;  
+  opacity: 1;
+}
+
+#group-modal h2 {  
+  margin: 0;  
+  padding: 20px 25px;  
+  font-size: 22px;  
+  background-color: #222;  
+  border-bottom: 1px solid #333;  
+  flex-shrink: 0;
+}
+
+#movie-overview {  
+  margin: 20px 25px;  
+  line-height: 1.4;  
+  font-size: 14px;  
+  color: #ccc;  
+  border-top: 1px solid #333;  
+  padding-top: 10px;
+}
+
+#group-modal ul {  
+  list-style: none;  
+  padding: 10px 0;  
+  margin: 0;  
+  flex: 1;  
+  overflow-y: auto;  
+  background-color: #1a1a1a; /* Subtle background for list */
+}
+
+#group-modal li {  
+  margin: 0 25px;  
+  padding: 15px 0;  
+  display: flex;  
+  justify-content: space-between;  
+  align-items: center;  
+  border-bottom: 1px solid #2a2a2a;  
+  font-size: 16px;  
+  transition: background-color 0.3s; /* Smooth hover transition */
+}
+
+#group-modal li:hover {  
+  background-color: #222; /* Light hover effect */
+}
+
+#group-modal ul li > button:only-child {    
+  width: 100%;    
+  text-align: left;    
+  padding: 12px 20px;    
+  font-size: 16px;    
+  justify-content: flex-start;  
+} 
+
+#group-modal li:last-child {  
+  border-bottom: none;
+}
+
+#group-modal li button {  
+  background-color: #007bff;  
+  color: white;  
+  border: none;  
+  padding: 8px 16px;  
+  border-radius: 5px;  
+  cursor: pointer;  
+  font-size: 14px;  
+  font-weight: 500;  
+  margin-left: 10px;  
+  transition: background-color 0.2s ease, transform 0.1s;
+}
+
+#group-modal li button:hover {  
+  background-color: #0056b3;  
+  transform: scale(1.05);
+}
+
+#group-modal li button:nth-of-type(n+2) {  
+  background-color: #333;
+}
+
+#group-modal li button:nth-of-type(n+2):hover {  
+  background-color: #444;
+}
+
+#group-modal > button {  
+  margin: 20px auto;  
+  padding: 12px 30px;  
+  background: #555;  
+  color: white;  
+  border: none;  
+  border-radius: 5px;  
+  cursor: pointer;  
+  font-size: 16px;  
+  font-weight: 500;  
+  flex-shrink: 0;  
+  transition: background-color 0.2s ease, transform 0.1s;
+}
+
+#group-modal > button:hover {  
+  background: #666;  
+  transform: scale(1.05);
+}
+
+/* --- START: MODERN SERIES & EPISODE STYLES --- */
+.series-detail-page {  
+  position: fixed;  
+  top: 0;  
+  left: 0;  
+  width: 100%;  
+  height: 100%;  
+  background-color: #121212;  
+  z-index: 1500;  
+  display: flex;  
+  flex-direction: column;  
+  overflow-y: auto;  
+  animation: fade-in 0.3s ease-out;
+}
+
+@keyframes fade-in { 
+  from { opacity: 0; } 
+  to { opacity: 1; } 
+}
+
+.series-hero {  
+  position: relative;  
+  width: 100%;  
+  height: 40vh;  
+  min-height: 300px;  
+  display: flex;  
+  align-items: flex-end;  
+  padding: 2rem;  
+  box-sizing: border-box;  
+  background-size: cover;  
+  background-position: center 25%;
+}
+
+.series-hero::before {  
+  content: '';  
+  position: absolute;  
+  top: 0;  
+  left: 0;  
+  right: 0;  
+  bottom: 0;  
+  background: linear-gradient(to top, rgba(18,18,18,1) 10%, rgba(18,18,18,0.7) 50%, rgba(18,18,18,0.2) 100%);
+}
+
+.series-hero-content {  
+  position: relative;  
+  z-index: 2;  
+  display: flex;  
+  gap: 2rem;  
+  align-items: center;
+}
+
+.series-hero-poster {  
+  width: 150px;  
+  height: 225px;  
+  border-radius: 8px;  
+  box-shadow: 0 5px 20px rgba(0,0,0,0.5);  
+  object-fit: cover;
+}
+
+.series-hero-info h1 {  
+  font-size: 2.5rem;  
+  margin: 0 0 10px 0;  
+  font-weight: 700;
+}
+
+.series-hero-info p {  
+  font-size: 1rem;  
+  color: #ccc;  
+  max-width: 600px;  
+  line-height: 1.5;  
+  display: -webkit-box;  
+  -webkit-line-clamp: 3;  
+  -webkit-box-orient: vertical;  
+  overflow: hidden;
+}
+
+.series-browser {  
+  padding: 2rem;  
+  box-sizing: border-box;
+}
+
+.back-button {  
+  position: absolute;  
+  top: 20px;  
+  left: 20px;  
+  background: rgba(0,0,0,0.5);  
+  color: white;  
+  border: 1px solid rgba(255,255,255,0.2);  
+  border-radius: 50%;  
+  width: 40px;  
+  height: 40px;  
+  font-size: 20px;  
+  cursor: pointer;  
+  transition: all 0.2s ease;  
+  z-index: 3;
+}
+
+.back-button:hover {  
+  background: rgba(0,0,0,0.8);  
+  transform: scale(1.1);
+}
+
+.season-tabs {  
+  display: flex;  
+  gap: 10px;  
+  margin-bottom: 2rem;  
+  border-bottom: 1px solid #333;  
+  padding-bottom: 1rem;
+}
+
+.season-tabs button {  
+  background-color: #2a2a2a;  
+  color: #ccc;  
+  border: 1px solid transparent;  
+  padding: 10px 20px;  
+  border-radius: 20px;  
+  font-size: 1rem;  
+  font-weight: 500;  
+  cursor: pointer;  
+  transition: all 0.3s ease;
+}
+
+.season-tabs button:hover {  
+  background-color: #333;  
+  color: #fff;
+}
+
+.season-tabs button.active {  
+  background-color: #007bff;  
+  color: white;  
+  border-color: #007bff;
+}
+
+.episode-list {  
+  list-style: none;  
+  padding: 0;  
+  margin: 0;  
+  display: flex;  
+  flex-direction: column;  
+  gap: 15px;
+}
+
+.episode-list-item {  
+  background-color: #1a1a1a;  
+  border-radius: 8px;  
+  padding: 15px;  
+  display: flex;  
+  align-items: center;  
+  gap: 20px;  
+  cursor: pointer;  
+  transition: background-color 0.2s ease;  
+  position: relative;  
+  overflow: hidden;
+}
+
+.episode-list-item:hover {  
+  background-color: #252525;
+}
+
+.episode-thumbnail {  
+  width: 160px;  
+  height: 90px;  
+  background-color: #333;  
+  border-radius: 4px;  
+  flex-shrink: 0;  
+  display: flex;  
+  align-items: center;  
+  justify-content: center;  
+  color: #777;
+}
+
+.episode-info {  
+  flex-grow: 1; 
+}
+
+.episode-info h3 {  
+  margin: 0 0 5px 0;  
+  font-size: 1.1rem;  
+  color: #f5f5f5;
+}
+
+.episode-info p {  
+  margin: 0;  
+  font-size: 0.9rem;  
+  color: #aaa;  
+  line-height: 1.4;  
+  display: -webkit-box;  
+  -webkit-line-clamp: 2;  
+  -webkit-box-orient: vertical;  
+  overflow: hidden;
+}
+
+.play-icon {  
+  position: absolute;  
+  top: 50%;  
+  left: 80px; /* Centered on thumbnail */  
+  transform: translate(-50%, -50%);  
+  font-size: 40px;  
+  color: rgba(255, 255, 255, 0.8);  
+  opacity: 0;  
+  transition: opacity 0.2s ease;  
+  pointer-events: none;
+}
+
+.episode-list-item:hover .play-icon {  
+  opacity: 1;
+}
+
+/* --- END: MODERN SERIES & EPISODE STYLES --- */
+
+/* --- Improved Settings Modal Styles --- */
+#settings-modal {  
+  position: fixed;  
+  top: 50%;  
+  left: 50%;  
+  transform: translate(-50%, -50%);  
+  background: #222;  
+  padding: 20px;  
+  border-radius: 8px;  
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.5); /* Enhanced shadow */  
+  z-index: 2001;  
+  color: #eee;  
+  display: none;  
+  transition: opacity 0.3s ease, transform 0.3s ease; /* Smooth transitions */
+}
+
+#settings-modal.active {  
+  display: block;  
+  opacity: 1;  
+  transform: translate(-50%, -50%) scale(1);
+}
+
+#settings-modal h3 {  
+  margin-top: 0;  
+  font-size: 18px;  
+  color: #f5f5f5;
+}
+
+#settings-modal label {  
+  display: block;  
+  margin: 10px 0 5px;  
+  font-weight: 600;  
+  color: #ccc;
+}
+
+#settings-modal select, #settings-modal button {  
+  width: 100%;  
+  padding: 8px;  
+  margin-bottom: 10px;  
+  border-radius: 5px;  
+  background-color: #1f1f1f;  
+  border: 1px solid #333;  
+  color: #eee;  
+  font-size: 14px;  
+  transition: background-color 0.3s, border-color 0.3s;
+}
+
+#settings-modal select:focus, #settings-modal button:focus {  
+  outline: none;  
+  border-color: #007bff;  
+  box-shadow: 0 0 5px rgba(13, 110, 253, 0.5); /* Focus glow effect */
+}
+
+#settings-modal button {  
+  background-color: #007bff;  
+  color: white;  
+  cursor: pointer;  
+  transition: background-color 0.3s, transform 0.1s;
+}
+
+#settings-modal button:hover {  
+  background-color: #0056b3;  
+  transform: scale(1.05);
+}
+
+#close-settings {  
+  background: #555;  
+  color: white;  
+  border: none;  
+  cursor: pointer;
+}
+
+/* --- Auth page styles --- */
+.auth-page {  
+  display: flex;  
+  flex-direction: column;  
+  align-items: center;  
+  justify-content: center;  
+  height: 80vh;  
+  background-color: #121212;
+}
+
+.auth-form {  
+  background: #1f1f1f;  
+  padding: 30px;  
+  border-radius: 8px;  
+  border: 1px solid #333;  
+  width: 100%;  
+  max-width: 350px;  
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3); /* Better shadow for forms */
+}
+
+.auth-form h2 {  
+  text-align: center;  
+  margin-top: 0;  
+  color: #f5f5f5;
+}
+
+.auth-form input {  
+  width: 100%;  
+  padding: 10px;  
+  margin-bottom: 15px;  
+  background: #2a2a2a;  
+  border: 1px solid #444;  
+  color: #eee;  
+  border-radius: 5px;  
+  box-sizing: border-box;  
+  transition: border-color 0.3s;
+}
+
+.auth-form input:focus {  
+  outline: none;  
+  border-color: #007bff;  
+  box-shadow: 0 0 5px rgba(13, 110, 253, 0.5); /* Focus glow effect */
+}
+
+.auth-form button {  
+  width: 100%;  
+  padding: 12px;  
+  background: #007bff;  
+  color: white;  
+  border: none;  
+  border-radius: 5px;  
+  cursor: pointer;  
+  font-size: 16px;  
+  transition: background-color 0.3s, transform 0.1s;
+}
+
+.auth-form button:hover {  
+  background-color: #0056b3;  
+  transform: scale(1.05);
+}
+
+.auth-form .error {  
+  color: #ff4d4d;  
+  margin-bottom: 15px;  
+  text-align: center;  
+  font-weight: 600;
+}
+
+.auth-form .switch-link {  
+  text-align: center;  
+  margin-top: 20px;  
+  font-size: 14px;
+}
+
+.auth-form .switch-link a {  
+  color: #007bff;  
+  text-decoration: none;  
+  transition: color 0.3s;
+}
+
+.auth-form .switch-link a:hover {  
+  color: #0d6efd;  
+  text-decoration: underline;
+}
+
+/* --- Modal Overlay Styles (for SeasonModal, etc.) --- */
+.modal-overlay {  
+  position: fixed;  
+  top: 0;  
+  left: 0;  
+  right: 0;  
+  bottom: 0;  
+  background-color: rgba(0, 0, 0, 0.75);  
+  display: flex;  
+  align-items: center;  
+  justify-content: center;  
+  z-index: 1050;  
+  color: #333;
+}
+
+.modal-content {  
+  background-color: #222;  
+  padding: 2rem 3rem;  
+  border-radius: 8px;  
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);  
+  text-align: center;  
+  max-width: 400px;  
+  width: 90%;  
+  animation: modal-fade-in 0.3s ease-out;
+}
+
+@keyframes modal-fade-in {  
+  from {    
+    opacity: 0;    
+    transform: translateY(-20px);  
+  }  
+  to {    
+    opacity: 1;    
+    transform: translateY(0);  
+  }
+}
+
+.modal-content h2 {  
+  margin-top: 0;  
+  font-size: 1.5rem;  
+  color: #f5f5f5;
+}
+
+.modal-content p {  
+  margin-bottom: 2rem;  
+  font-size: 1.1rem;  
+  color: #ccc;
+}
+
+.modal-actions {  
+  display: flex;  
+  justify-content: space-around;  
+  gap: 1rem;
+}
+
+.modal-actions button {  
+  padding: 0.75rem 1.5rem;  
+  border: none;  
+  border-radius: 5px;  
+  font-size: 1rem;  
+  font-weight: bold;  
+  cursor: pointer;  
+  transition: background-color 0.2s ease, transform 0.1s ease;  
+  min-width: 120px;
+}
+
+.modal-actions button:active {  
+  transform: scale(0.98);
+}
+
+.modal-actions .btn-primary {  
+  background-color: #0d6efd; /* Modern blue */  
+  color: white;
+}
+
+.modal-actions .btn-primary:hover {  
+  background-color: #0b5ed7;
+}
+
+.modal-actions .btn-secondary {  
+  background-color: #6c757d;  
+  color: white;
+}
+
+.modal-actions .btn-secondary:hover {  
+  background-color: #5a6268;
+}
+
+/* --- Subtitle Picker Styles --- Keep existing styles as they are not changed */
+/* --- General Improvements --- */
+button {  
+  transition: all 0.3s ease; /* Consistent transition for all buttons */
+}
+
+#library, .movie-row {  
+  gap: 20px; /* Ensure consistent spacing */
+}
+
+.movie-item {  
+  border-radius: 8px;  
+  overflow: hidden;  
+  transition: transform 0.3s ease, box-shadow 0.3s ease; /* Smoother transitions */
+}
+
+.movie-item:hover {  
+  transform: scale(1.05);  
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes spin {  
+  0% {    
+    transform: rotate(0deg);  
+  }  
+  100% {    
+    transform: rotate(360deg);  
+  }
+}
+.episode-thumbnail {
+  width: 160px;
+  height: 90px;
+  background-color: #333;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #777;
+  position: relative;
+  overflow: hidden; /* Ensure images don't overflow the container */
+}
+
+/* Add this new rule for images inside episode thumbnails */
+.episode-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover; /* This will crop the image to fit the container */
+  display: block;
+  border-radius: 4px;
+}
+
+.episode-thumbnail .play-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 30px;
+  color: rgba(255, 255, 255, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.3);
+  transition: opacity 0.2s ease;
+}
+
+.episode-list-item:hover .episode-thumbnail .play-icon {
+  opacity: 0.9;
+}
+
+/* --- START: Subtitle Picker Modal Styles --- */
+.subtitle-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2050; /* Higher than player and other modals */
+  color: #eee;
+  animation: modal-fade-in 0.2s ease-out;
+}
+
+.subtitle-modal {
+  background-color: #282828;
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  border-radius: 8px;
+  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.subtitle-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 20px;
+  background-color: #1f1f1f;
+  border-bottom: 1px solid #444;
+  flex-shrink: 0;
+}
+
+.subtitle-modal-header h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.subtitle-modal-header .close-btn {
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 24px;
+  font-weight: bold;
+  cursor: pointer;
+  padding: 0 5px;
+  line-height: 1;
+  transition: color 0.2s ease;
+}
+.subtitle-modal-header .close-btn:hover {
+  color: #fff;
+}
+
+.subtitle-modal-content {
+  padding: 10px 20px 20px 20px;
+  overflow-y: auto;
+  flex-grow: 1;
+}
+
+.subtitle-error {
+  background-color: #5d2b2b;
+  color: #f7d4d4;
+  padding: 10px 15px;
+  border-radius: 5px;
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.subtitle-modal h3 {
+  margin: 15px 0 15px 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #ccc;
+  border-bottom: 1px solid #444;
+  padding-bottom: 8px;
+}
+
+.current-selection, .available-subtitles, .search-section {
+  margin-bottom: 20px;
+}
+
+.subtitle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.subtitle-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #333;
+  padding: 12px 15px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.subtitle-option:hover:not(.active) {
+  background-color: #3f3f3f;
+}
+
+.subtitle-option.active {
+  background-color: #3a4a5e;
+  border-color: #007bff;
+  cursor: default;
+}
+
+.subtitle-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden; /* Prevent long names from breaking layout */
+}
+
+.subtitle-name {
+  font-weight: 500;
+  color: #f5f5f5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subtitle-lang {
+  font-size: 0.8rem;
+  color: #00aaff;
+  background-color: rgba(0, 132, 255, 0.15);
+  padding: 2px 6px;
+  border-radius: 10px;
+  align-self: flex-start;
+}
+
+.subtitle-description {
+  font-size: 0.85rem;
+  color: #aaa;
+}
+
+.active-badge {
+  background-color: #007bff;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: bold;
+  padding: 4px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.select-btn, .download-btn {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.select-btn:hover, .download-btn:hover {
+  background-color: #0056b3;
+}
+
+.search-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.search-header h3 {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin: 0;
+}
+
+.toggle-search-btn {
+  background: none;
+  border: 1px solid #555;
+  color: #ccc;
+  padding: 5px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.toggle-search-btn:hover {
+  background: #444;
+  color: #fff;
+}
+
+.search-content {
+  background-color: #1f1f1f;
+  padding: 15px;
+  margin-top: 15px;
+  border-radius: 6px;
+  animation: fade-in 0.3s ease;
+}
+
+.search-controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 15px;
+  flex-wrap: wrap;
+}
+
+.language-select {
+  flex-grow: 1;
+}
+
+.search-btn {
+  flex-grow: 1;
+}
+
+.language-select, .search-btn {
+  padding: 8px 12px;
+  border-radius: 5px;
+  border: 1px solid #444;
+  background-color: #333;
+  color: #eee;
+  font-size: 1rem;
+}
+
+.search-btn {
+  background-color: #007bff;
+  border-color: #007bff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.search-btn:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+.spinner.small {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: spin 0.8s linear infinite;
+  border-radius: 50%;
+}
+
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #aaa;
+  padding: 20px 0;
+}
+
+.loading-state .spinner {
+  width: 24px;
+  height: 24px;
+  border-width: 3px;
+  border-top-color: #007bff;
+  border-left-color: transparent;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+  animation: spin 1s linear infinite;
+  border-radius: 50%;
+}
+/* --- END: Subtitle Picker Modal Styles --- */
+/* --- START: Settings Page & Components Styles --- */
+
+.settings-page-container {
+  padding: 20px;
+  max-width: 900px;
+  margin: 40px auto;
+  animation: modal-fade-in 0.3s ease-out;
+}
+
+/* Style the header within the settings page */
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #333;
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+}
+
+.settings-header h1 {
+  margin: 0;
+  color: #f5f5f5;
+  font-size: 2rem;
+}
+
+.settings-header p {
+  color: #aaa;
+  margin: 5px 0 0 0;
+}
+
+.settings-header a button {
+  font-size: 14px;
+}
+
+/* Use the existing .header-nav for the tabs, but give it a bottom margin */
+.settings-page-container .header-nav {
+  margin-bottom: 30px;
+  padding-left: 0;
+  justify-content: flex-start;
+  border-bottom: none;
+}
+
+/* Styling for forms within the settings panels (.info-panel) */
+.info-panel form {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #444;
+}
+
+.info-panel form h4 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  font-size: 1.1rem;
+}
+
+.info-panel input[type="text"],
+.info-panel select {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 15px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #eee;
+  border-radius: 5px;
+  box-sizing: border-box; /* Important */
+  transition: border-color 0.3s;
+  font-size: 15px;
+}
+
+.info-panel input[type="text"]:focus,
+.info-panel select:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 5px rgba(13, 110, 253, 0.5);
+}
+
+.info-panel form button {
+  width: auto; /* Don't take full width */
+  padding: 10px 20px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.info-panel form button:hover {
+  background-color: #0056b3;
+}
+
+/* Styling for the list of libraries in SettingsLibraries.jsx */
+.info-panel ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.info-panel ul li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #2a2a2a;
+  padding: 12px 15px;
+  border-radius: 6px;
+  border: 1px solid #3a3a3a;
+}
+
+.info-panel ul li p {
+  margin: 5px 0 0;
+  color: #aaa;
+  font-size: 14px;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.info-panel ul li button {
+  background-color: #dc3545; /* Red for delete */
+  color: white;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 5px;
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0; /* Prevent button from shrinking */
+  margin-left: 15px;
+}
+
+.info-panel ul li button:hover {
+  background-color: #c82333;
+}
+
+.info-panel .error {
+  color: #ffcfcf;
+  background-color: #5d2b2b;
+  border: 1px solid #863f3f;
+  padding: 12px;
+  border-radius: 5px;
+  margin-bottom: 15px;
+  text-align: center;
+  font-weight: 500;
+}
+
+.settings-header .btn-primary {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background-color 0.3s, transform 0.1s;
+}
+
+.settings-header .btn-primary:hover {
+  background-color: #0056b3;
+  transform: scale(1.05);
+}
+/* --- END: Settings Page & Components Styles --- */
