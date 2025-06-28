@@ -30,7 +30,10 @@ class Server(Base):
     server_unique_id = Column(Uuid, unique=True, index=True, nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     friendly_name = Column(Text, nullable=False)
-    last_known_url = Column(Text, nullable=True)
+    local_url = Column(Text, nullable=True)  # The URL the server reports for itself
+    public_ip = Column(String(45), nullable=True) # To store IPv4 or IPv6
+    public_port = Column(Integer, nullable=True)
+    last_heartbeat = Column(DateTime(timezone=True), nullable=True)
     owner = relationship("User", back_populates="servers")
     permissions = relationship("SharingPermission", back_populates="server", cascade="all, delete-orphan")
 

@@ -4,12 +4,13 @@ import uuid
 import secrets
 import logging
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from uuid import UUID
+from urllib.parse import urlparse
 
 import auth
 import models
@@ -96,15 +97,12 @@ def validate_token(request: models.ValidateRequest, db: Session = Depends(get_db
     user = db.query(database.User).filter(database.User.username == username).first()
     server = db.query(database.Server).filter(database.Server.server_unique_id == request.server_unique_id).first()
     
-    # If user or server not found, token is invalid for this context
     if not user or not server:
         return models.ValidateResponse(is_valid=False)
 
-    # Check if the user is the owner
     if server.owner_id == user.id:
         return models.ValidateResponse(is_valid=True, username=user.username, is_owner=True)
     
-    # Check for sharing permissions
     permission = db.query(database.SharingPermission).filter_by(user_id=user.id, server_id=server.id).first()
     if permission:
         return models.ValidateResponse(is_valid=True, username=user.username, is_owner=False)
@@ -119,13 +117,16 @@ class HeartbeatRequest(BaseModel):
     server_unique_id: UUID
     url: str
 
+class ServerAddressResponse(BaseModel):
+    public_ip: str
+    public_port: int
+    
 # --- Server Management Endpoints ---
 @app.post("/servers/generate-claim-token", response_model=dict)
 def generate_claim_token(request: GenerateTokenRequest, db: Session = Depends(get_db)):
     """Called by a new media server to get a short-lived claim token."""
     server_id = request.server_id
     
-    # Invalidate any old token for this server
     db.query(database.ClaimToken).filter_by(server_unique_id=server_id).delete()
 
     token_str = secrets.token_urlsafe(16)[:4].upper()
@@ -142,14 +143,13 @@ def generate_claim_token(request: GenerateTokenRequest, db: Session = Depends(ge
 
 @app.post("/servers/claim", status_code=status.HTTP_201_CREATED, response_model=models.ServerInfo)
 def claim_server(
-    claim_request: models.ClaimRequest, # This now expects the URL
+    claim_request: models.ClaimRequest,
     db: Session = Depends(get_db),
     current_user: models.UserInDB = Depends(get_current_user),
 ):
     """Called by the frontend to link a server to a logged-in user."""
     token_record = db.query(database.ClaimToken).filter_by(token=claim_request.claim_token.upper()).first()
 
-    # Compare datetimes correctly using a timezone-aware 'now'.
     if not token_record or token_record.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=404, detail="Claim token is invalid or has expired.")
 
@@ -157,36 +157,63 @@ def claim_server(
     if existing_server:
         raise HTTPException(status_code=409, detail="This server has already been claimed.")
     
-    # MODIFIED: Use the URL from the claim request
     new_server = database.Server(
         server_unique_id=token_record.server_unique_id,
         owner_id=current_user.id,
         friendly_name=claim_request.friendly_name,
-        last_known_url=claim_request.url
+        local_url=claim_request.url 
     )
     db.add(new_server)
-    db.delete(token_record) # Consume the token
+    db.delete(token_record)
     db.commit()
     db.refresh(new_server)
     
     return models.ServerInfo(
         server_unique_id=new_server.server_unique_id,
         friendly_name=new_server.friendly_name,
-        last_known_url=new_server.last_known_url,
+        last_known_url=new_server.local_url, # Keep original model for now
         is_owner=True
     )
 
 @app.post("/servers/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
-def server_heartbeat(request: HeartbeatRequest, db: Session = Depends(get_db)):
-    """Called by a media server to update its last_known_url."""
+def server_heartbeat(request: HeartbeatRequest, http_request: Request, db: Session = Depends(get_db)):
+    """Called by a media server to update its public IP and port."""
     server = db.query(database.Server).filter_by(server_unique_id=request.server_unique_id).first()
     if not server:
-        # Don't throw an error; the server might not be claimed yet.
         return
     
-    server.last_known_url = request.url
+    client_host = http_request.client.host
+    parsed_url = urlparse(request.url)
+    
+    server.local_url = request.url
+    server.public_ip = client_host
+    server.public_port = parsed_url.port or 80 # Default to 80 if not specified
+    server.last_heartbeat = datetime.now(timezone.utc)
     db.commit()
     return
+
+@app.get("/servers/{server_unique_id}/address", response_model=ServerAddressResponse)
+def get_server_address(
+    server_unique_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: models.UserInDB = Depends(get_current_user)
+):
+    """Gets the last known public IP and port for a server."""
+    server = db.query(database.Server).filter_by(server_unique_id=server_unique_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found.")
+
+    # Check if user has permission
+    is_owner = server.owner_id == current_user.id
+    permission = db.query(database.SharingPermission).filter_by(user_id=current_user.id, server_id=server.id).first()
+    
+    if not is_owner and not permission:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this server's address.")
+
+    if not server.public_ip or not server.public_port:
+        raise HTTPException(status_code=404, detail="Server has not reported a public address yet. Make sure it's running and connected.")
+
+    return ServerAddressResponse(public_ip=server.public_ip, public_port=server.public_port)
 
 # --- User-Facing Endpoints ---
 @app.get("/me/servers", response_model=list[models.ServerInfo])
@@ -206,14 +233,14 @@ def get_my_servers(
         server_list.append(models.ServerInfo(
             server_unique_id=s.server_unique_id,
             friendly_name=s.friendly_name,
-            last_known_url=s.last_known_url,
+            last_known_url=s.local_url, # Use local_url here
             is_owner=True
         ))
     for s in shared_servers:
         server_list.append(models.ServerInfo(
             server_unique_id=s.server_unique_id,
             friendly_name=s.friendly_name,
-            last_known_url=s.last_known_url,
+            last_known_url=s.local_url, # And here
             is_owner=False
         ))
     return server_list
