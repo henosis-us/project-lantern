@@ -3,10 +3,12 @@ import sqlite3
 import os
 from pathlib import Path
 
-DATABASE_NAME = "lantern.db"
+DATABASE_NAME = os.environ.get("DATABASE_PATH", "data/lantern.db")
 
 def get_db_connection():
     """Establishes a connection to the database."""
+    db_path = Path(DATABASE_NAME)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DATABASE_NAME)
     conn.row_factory = sqlite3.Row
     return conn

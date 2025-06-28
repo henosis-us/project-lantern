@@ -225,11 +225,17 @@ async def heartbeat_task(server_unique_id: str):
 async def lifespan(app: FastAPI):
     # Startup logic
     print("Server starting up...")
+
+    # MODIFIED: Initialize the database on startup to ensure all tables exist.
+    # This must be done before any other database operations.
+    print("Initializing database schema...")
+    initialize_db()
+    print("Database schema initialization complete.")
+
     hls_base_dir = os.path.join("static", "hls")
     if os.path.exists(hls_base_dir):
         shutil.rmtree(hls_base_dir)
     os.makedirs(hls_base_dir, exist_ok=True)
-    initialize_db()
 
     print(f"Using configured LMS_PUBLIC_URL: {LMS_PUBLIC_URL}")
 
@@ -252,7 +258,7 @@ async def lifespan(app: FastAPI):
         response.raise_for_status()
         claim_token_data = response.json()
         claim_token = claim_token_data.get("claim_token")
-        
+                
         cursor.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('claim_token', ?)", (claim_token,))
         conn.commit()
 
@@ -266,7 +272,7 @@ async def lifespan(app: FastAPI):
     except requests.RequestException as e:
         print("\n--- !!! CRITICAL STARTUP ERROR !!! ---")
         print(f"Could not get claim token from the Identity Service: {e}")
-        print(f"Is the Identity Service running at {IDENTITY_SERVICE_URL}?")
+        print(f"Is the Identity Service running at {IDENTITY_SERVICE_URL}? ")
         print("--------------------------------------\n")
     finally:
         conn.close()
@@ -274,9 +280,9 @@ async def lifespan(app: FastAPI):
     print(f"Sending initial heartbeat for server {server_unique_id} with URL {LMS_PUBLIC_URL}")
     asyncio.create_task(send_heartbeat(server_unique_id))
     asyncio.create_task(heartbeat_task(server_unique_id))
-    
+        
     yield
-    
+        
     # Shutdown logic
     print("Server shutting down...")
     global active_processes

@@ -7,10 +7,12 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from uuid import UUID
 from urllib.parse import urlparse
+import httpx # NEW IMPORT
 
 import auth
 import models
@@ -27,7 +29,7 @@ database.Base.metadata.create_all(bind=database.engine)
 app = FastAPI(title="Lantern Identity Service")
 
 # --- Middleware ---
-origins_from_env_str = os.getenv("ALLOWED_ORIGINS", "https://lantern.henosis.us")
+origins_from_env_str = os.getenv("ALLOWED_ORIGINS", "https://lantern.henosis.us,http://localhost:5173") # Allow localhost for local dev
 configured_origins = [o.strip() for o in origins_from_env_str.split(',')]
 logging.info(f"CORS middleware configured with origins: {configured_origins}")
 
@@ -58,6 +60,80 @@ def get_current_user(db: Session = Depends(get_db), token: str = Depends(auth.oa
         )
     return user
 
+# --- NEW: Secure Gateway Logic ---
+async def _get_permitted_server_url(server_unique_id: UUID, current_user: models.UserInDB, db: Session) -> str:
+    """Helper to find a server and check if the user has permission to access it."""
+    server = db.query(database.Server).filter(database.Server.server_unique_id == server_unique_id).first()
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    is_owner = server.owner_id == current_user.id
+    permission = db.query(database.SharingPermission).filter_by(user_id=current_user.id, server_id=server.id).first()
+
+    if not is_owner and not permission:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this server")
+
+    if not server.local_url:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server is currently offline or has not reported its address.")
+        
+    return server.local_url
+
+async def _proxy_request(server_url: str, request: Request, sub_path: str):
+    """Generic function to proxy an incoming request to a backend server."""
+    # Use a longer timeout for potentially slow media server operations
+    timeout = httpx.Timeout(5.0, read=60.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        # Construct the full target URL
+        url = httpx.URL(url=f"{server_url.rstrip('/')}/{sub_path}", params=request.query_params)
+        
+        # Prepare the request to be forwarded
+        headers = dict(request.headers)
+        headers['host'] = url.host # The host header must match the target, not the proxy
+        # Clean up headers that should not be forwarded
+        headers.pop('content-length', None)
+        headers.pop('transfer-encoding', None)
+        
+        # Read the body of the original request
+        body = await request.body()
+
+        # Make the request to the media server
+        try:
+            proxied_req = client.build_request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                content=body
+            )
+            proxied_resp = await client.send(proxied_req, stream=True)
+        except httpx.RequestError as e:
+            logging.error(f"Gateway request to {url} failed: {e}")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Cannot connect to media server: {e}")
+
+        # Stream the response back to the original client
+        return StreamingResponse(
+            proxied_resp.aiter_raw(),
+            status_code=proxied_resp.status_code,
+            headers=dict(proxied_resp.headers)
+        )
+
+# Create catch-all endpoints for all common HTTP methods
+@app.api_route("/gateway/{server_unique_id}/{sub_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def media_server_gateway(
+    server_unique_id: UUID,
+    sub_path: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.UserInDB = Depends(get_current_user),
+):
+    """
+    Secure gateway to proxy requests to media servers.
+    The frontend calls this endpoint, and this endpoint forwards the request to the
+    correct (insecure) media server, solving the Mixed Content issue.
+    """
+    server_url = await _get_permitted_server_url(server_unique_id, current_user, db)
+    return await _proxy_request(server_url, request, sub_path)
+
+
 # --- Auth Endpoints ---
 @app.post("/auth/register", status_code=status.HTTP_201_CREATED, response_model=models.UserInDB)
 def register_user(user_in: models.UserCreate, db: Session = Depends(get_db)):
@@ -65,7 +141,7 @@ def register_user(user_in: models.UserCreate, db: Session = Depends(get_db)):
     existing_user = db.query(database.User).filter(database.User.username == user_in.username).first()
     if existing_user:
         raise HTTPException(status_code=409, detail="Username already registered")
-    
+        
     hashed_password = auth.get_password_hash(user_in.password)
     db_user = database.User(username=user_in.username, password_hash=hashed_password)
     db.add(db_user)
@@ -96,13 +172,13 @@ def validate_token(request: models.ValidateRequest, db: Session = Depends(get_db
     username = payload.get("sub")
     user = db.query(database.User).filter(database.User.username == username).first()
     server = db.query(database.Server).filter(database.Server.server_unique_id == request.server_unique_id).first()
-    
+        
     if not user or not server:
         return models.ValidateResponse(is_valid=False)
 
     if server.owner_id == user.id:
         return models.ValidateResponse(is_valid=True, username=user.username, is_owner=True)
-    
+        
     permission = db.query(database.SharingPermission).filter_by(user_id=user.id, server_id=server.id).first()
     if permission:
         return models.ValidateResponse(is_valid=True, username=user.username, is_owner=False)
@@ -156,7 +232,7 @@ def claim_server(
     existing_server = db.query(database.Server).filter_by(server_unique_id=token_record.server_unique_id).first()
     if existing_server:
         raise HTTPException(status_code=409, detail="This server has already been claimed.")
-    
+        
     new_server = database.Server(
         server_unique_id=token_record.server_unique_id,
         owner_id=current_user.id,
@@ -168,52 +244,28 @@ def claim_server(
     db.commit()
     db.refresh(new_server)
     
+    # Construct the correct gateway URL for the response
+    identity_base_url = os.getenv("IDENTITY_PUBLIC_URL", "https://lantern.henosis.us")
+    gateway_url = f"{identity_base_url}/gateway/{new_server.server_unique_id}"
+
     return models.ServerInfo(
         server_unique_id=new_server.server_unique_id,
         friendly_name=new_server.friendly_name,
-        last_known_url=new_server.local_url, # Keep original model for now
+        last_known_url=gateway_url, # Respond with the gateway URL
         is_owner=True
     )
 
 @app.post("/servers/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
 def server_heartbeat(request: HeartbeatRequest, http_request: Request, db: Session = Depends(get_db)):
-    """Called by a media server to update its public IP and port."""
+    """Called by a media server to update its local URL."""
     server = db.query(database.Server).filter_by(server_unique_id=request.server_unique_id).first()
     if not server:
         return
-    
-    client_host = http_request.client.host
-    parsed_url = urlparse(request.url)
-    
+            
     server.local_url = request.url
-    server.public_ip = client_host
-    server.public_port = parsed_url.port or 80 # Default to 80 if not specified
     server.last_heartbeat = datetime.now(timezone.utc)
     db.commit()
     return
-
-@app.get("/servers/{server_unique_id}/address", response_model=ServerAddressResponse)
-def get_server_address(
-    server_unique_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: models.UserInDB = Depends(get_current_user)
-):
-    """Gets the last known public IP and port for a server."""
-    server = db.query(database.Server).filter_by(server_unique_id=server_unique_id).first()
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found.")
-
-    # Check if user has permission
-    is_owner = server.owner_id == current_user.id
-    permission = db.query(database.SharingPermission).filter_by(user_id=current_user.id, server_id=server.id).first()
-    
-    if not is_owner and not permission:
-        raise HTTPException(status_code=403, detail="You do not have permission to access this server's address.")
-
-    if not server.public_ip or not server.public_port:
-        raise HTTPException(status_code=404, detail="Server has not reported a public address yet. Make sure it's running and connected.")
-
-    return ServerAddressResponse(public_ip=server.public_ip, public_port=server.public_port)
 
 # --- User-Facing Endpoints ---
 @app.get("/me/servers", response_model=list[models.ServerInfo])
@@ -223,26 +275,28 @@ def get_my_servers(
 ):
     """Gets a list of all servers a user owns or has been granted access to."""
     owned_servers = db.query(database.Server).filter_by(owner_id=current_user.id).all()
-    
+        
     permissions = db.query(database.SharingPermission).filter_by(user_id=current_user.id).all()
     shared_server_ids = {p.server_id for p in permissions}
     shared_servers = db.query(database.Server).filter(database.Server.id.in_(shared_server_ids)).all()
 
     server_list = []
+    identity_base_url = os.getenv("IDENTITY_PUBLIC_URL", "https://lantern.henosis.us")
+
+    def create_server_info(s, is_owner):
+        gateway_url = f"{identity_base_url}/gateway/{s.server_unique_id}"
+        return models.ServerInfo(
+            server_unique_id=s.server_unique_id,
+            friendly_name=s.friendly_name,
+            last_known_url=gateway_url,
+            is_owner=is_owner
+        )
+
     for s in owned_servers:
-        server_list.append(models.ServerInfo(
-            server_unique_id=s.server_unique_id,
-            friendly_name=s.friendly_name,
-            last_known_url=s.local_url, # Use local_url here
-            is_owner=True
-        ))
+        server_list.append(create_server_info(s, is_owner=True))
     for s in shared_servers:
-        server_list.append(models.ServerInfo(
-            server_unique_id=s.server_unique_id,
-            friendly_name=s.friendly_name,
-            last_known_url=s.local_url, # And here
-            is_owner=False
-        ))
+        server_list.append(create_server_info(s, is_owner=False))
+        
     return server_list
 
 # --- Sharing Endpoints ---
@@ -251,10 +305,10 @@ def invite_user_to_server(request: models.InviteRequest, db: Session = Depends(g
     """Called by a media server (on behalf of its owner) to share access."""
     owner_server = db.query(database.Server).filter_by(server_unique_id=request.server_unique_id).first()
     invitee = db.query(database.User).filter_by(username=request.invitee_username).first()
-    
+        
     if not owner_server or not invitee:
         raise HTTPException(status_code=404, detail="Server or invitee user not found.")
-    
+        
     if owner_server.owner_id == invitee.id:
         raise HTTPException(status_code=400, detail="Cannot invite the server owner to their own server.")
 

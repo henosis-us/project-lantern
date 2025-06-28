@@ -58,34 +58,21 @@ export const AuthProvider = ({ children }) => {
     setJwt(null);
   };
 
-  const selectServer = async (server) => {
-    if (!server) {
-      console.error("Cannot select a null server.");
+  // MODIFIED: This function is now much simpler.
+  // It uses the gateway URL provided directly by the server object.
+  const selectServer = (server) => {
+    if (!server || !server.last_known_url) {
+      console.error("Cannot select server: server object is invalid or has no URL.", server);
+      alert("Could not connect to the server. The server might be offline or a network error occurred.");
       return;
     }
-    try {
-      // NAT Traversal Step: Ask the identity service for the server's public address
-      const { data: address } = await identityApi.get(`/servers/${server.server_unique_id}/address`);
-      
-      // Construct the URL from the response
-      const mediaServerUrl = `http://${address.public_ip}:${address.public_port}`;
-      
-      console.log(`Connecting to media server at dynamically fetched address: ${mediaServerUrl}`);
 
-      setActiveServer(server);
-      setMediaServerApi(() => createMediaServerApi(mediaServerUrl));
+    console.log(`Connecting to media server via secure gateway: ${server.last_known_url}`);
 
-    } catch (error) {
-      console.error("Failed to get server address for NAT traversal:", error);
-      // Fallback for local development or if the server is on the same network
-      if (server.last_known_url) {
-        console.warn(`Falling back to last known local URL: ${server.last_known_url}`);
-        setActiveServer(server);
-        setMediaServerApi(() => createMediaServerApi(server.last_known_url));
-      } else {
-        alert("Could not connect to the server. The server might be offline or a network error occurred.");
-      }
-    }
+    // The 'last_known_url' is now the gateway URL.
+    // We use it to create the media server API client.
+    setActiveServer(server);
+    setMediaServerApi(() => createMediaServerApi(server.last_known_url));
   };
 
   const refreshServers = async () => {
