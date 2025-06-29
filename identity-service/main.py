@@ -73,15 +73,15 @@ async def _get_permitted_server_url(server_unique_id: UUID, current_user: models
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server is currently offline or has not reported its address.")
     return server.local_url
 
-# --- FINAL PROXY FUNCTION with trusted header ---
+# --- PROXY FUNCTION with trusted header and proper resource management ---
 async def _proxy_request(server_url: str, request: Request, sub_path: str, current_user: models.UserInDB):
     """
     Proxies a request to the target media server, adding a trusted header
     with the authenticated user's information to break the auth validation loop.
-    """
-    target_url = f"{server_url.rstrip('/')}/{sub_path}"
     
-    # Prepare headers to be forwarded. Include the trusted header instead of Authorization.
+    This version correctly manages the lifecycle of the httpx client and response
+    to ensure the stream is not closed prematurely.
+    """
     headers_to_forward = {
         "X-Lantern-User": current_user.username,
         "X-Lantern-Is-Owner": "true" if request.state.is_owner else "false",
@@ -89,25 +89,49 @@ async def _proxy_request(server_url: str, request: Request, sub_path: str, curre
         "Accept": request.headers.get("Accept"),
     }
     headers_to_forward = {k: v for k, v in headers_to_forward.items() if v is not None}
+    
+    client = httpx.AsyncClient()
+    try:
+        # Build the request to be proxied
+        proxied_req = client.build_request(
+            method=request.method,
+            url=f"{server_url.rstrip('/')}/{sub_path}",
+            params=request.query_params,
+            content=await request.body(),
+            headers=headers_to_forward
+        )
+        
+        # Send the request and get a streaming response
+        proxied_resp = await client.send(proxied_req, stream=True)
 
-    async with httpx.AsyncClient() as client:
-        try:
-            proxied_req = client.build_request(
-                method=request.method,
-                url=target_url,
-                params=request.query_params,
-                content=await request.body(),
-                headers=headers_to_forward
-            )
-            proxied_resp = await client.send(proxied_req, stream=True)
-            return StreamingResponse(
-                proxied_resp.aiter_raw(),
-                status_code=proxied_resp.status_code,
-                headers=dict(proxied_resp.headers)
-            )
-        except httpx.RequestError as e:
-            logging.error(f"Gateway request to {target_url} failed: {e}", exc_info=True)
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Cannot connect to media server: {e}")
+        # This generator will yield the response body and close resources upon completion
+        async def stream_generator():
+            try:
+                async for chunk in proxied_resp.aiter_raw():
+                    yield chunk
+            finally:
+                await proxied_resp.aclose()
+                await client.aclose()
+
+        # Filter which headers to pass back to the client.
+        # It's unsafe to pass all headers, especially 'transfer-encoding'.
+        response_headers = {
+            "Content-Type": proxied_resp.headers.get("Content-Type"),
+            "Content-Disposition": proxied_resp.headers.get("Content-Disposition"),
+        }
+        response_headers = {k: v for k, v in response_headers.items() if v is not None}
+
+        return StreamingResponse(
+            stream_generator(),
+            status_code=proxied_resp.status_code,
+            headers=response_headers
+        )
+
+    except httpx.RequestError as e:
+        # Ensure the client is closed even if the initial connection fails
+        await client.aclose()
+        logging.error(f"Gateway request to {server_url.rstrip('/')}/{sub_path} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Cannot connect to media server: {e}")
 
 # Create catch-all endpoints for all common HTTP methods
 @app.api_route("/gateway/{server_unique_id}/{sub_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
