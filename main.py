@@ -39,8 +39,7 @@ HEARTBEAT_INTERVAL_MINUTES = int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", 5))
 
 # --- Path Translation Helper ---
 def _get_path_mappings() -> Dict[str, str]:
-    """
-    Parses the PATH_MAPPINGS environment variable into a dictionary.
+    """Parses the PATH_MAPPINGS environment variable into a dictionary.
     Format: "HostPath1=>ContainerPath1,HostPath2=>ContainerPath2"
     Returns: A dictionary like {'c:/movies': '/media/movies'}
     """
@@ -50,10 +49,8 @@ def _get_path_mappings() -> Dict[str, str]:
     
     mappings = {}
     for pair in mappings_str.split(','):
-        # Use '=>' as the delimiter to avoid ambiguity with Windows drive letters
         if '=>' in pair:
             host_path, container_path = pair.split('=>', 1)
-            # Normalize for comparison: lower-case and forward slashes
             normalized_host_path = host_path.strip().lower().replace('\\', '/')
             mappings[normalized_host_path] = container_path.strip()
     return mappings
@@ -63,13 +60,10 @@ if PATH_MAPPINGS:
     logging.info(f"Loaded path mappings for container: {PATH_MAPPINGS}")
 
 def _translate_host_path(host_path: str) -> str:
-    """
-    Translates a host path (e.g., from user input) to a container path if a mapping exists.
-    """
+    """Translates a host path to a container path if a mapping exists."""
     if not PATH_MAPPINGS:
         return host_path
-
-    # Normalize the input path for comparison
+    
     normalized_host_path = host_path.strip().lower().replace('\\', '/')
     
     best_match = ""
@@ -81,16 +75,14 @@ def _translate_host_path(host_path: str) -> str:
     if best_match:
         container_prefix = PATH_MAPPINGS[best_match]
         relative_path = normalized_host_path[len(best_match):]
-        # Use os.path.join for safety, ensuring correct separator handling.
-        # lstrip removes leading '/' from relative_path to prevent it from becoming the root.
         translated_path = os.path.join(container_prefix, relative_path.lstrip('/\\'))
         logging.info(f"Translated host path '{host_path}' to container path '{translated_path}'")
         return translated_path
-        
+            
     logging.warning(f"No container mapping found for host path '{host_path}'. Using original path.")
     return host_path
 
-# --- Segment Waiter Helper (and the rest of the file) ---
+# --- Segment Waiter Helper ---
 async def wait_for_ready(path: str):
     MIN_SEG_BYTES = 32 * 1024
     STABILITY_CHECKS = 2
@@ -145,11 +137,13 @@ def tmdb_details(tmdb_id: int):
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"TMDb details error: {e}")
 
-def generate_vod_manifest(duration_seconds: int):
+# MODIFIED: Accept a token to append to segment URLs
+def generate_vod_manifest(duration_seconds: int, token: str):
     num_segments = math.ceil(duration_seconds / SEGMENT_DURATION_SEC)
     manifest_lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{SEGMENT_DURATION_SEC}", "#EXT-X-PLAYLIST-TYPE:VOD"]
     for i in range(num_segments):
-        manifest_lines.extend([f"#EXTINF:{SEGMENT_DURATION_SEC:.6f},", f"stream{i}.ts"])
+        # MODIFIED: Append the token to each segment's URL
+        manifest_lines.extend([f"#EXTINF:{SEGMENT_DURATION_SEC:.6f},", f"stream{i}.ts?token={token}"])
     manifest_lines.append("#EXT-X-ENDLIST")
     return "\n".join(manifest_lines)
 
@@ -338,7 +332,8 @@ app.add_middleware(
     allow_origins=["http://localhost:5173", "https://lantern.henosis.us"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],)
+    allow_headers=["*"],
+)
 
 class HLSStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
@@ -510,20 +505,25 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
             force_transcode = True
             sub_path = os.path.join(os.getcwd(), full_sub_path)
         else:
-            soft_sub_url = str(request.base_url).rstrip("/") + f"/{full_sub_path}"
+            soft_sub_url = f"/{full_sub_path}?token={current_user['token']}"
+            
     if not force_transcode and prefer_direct and scale == "source" and can_direct_play(video_path):
         item_type_param = f"&item_type={item_type}" if item_type == "episode" else ""
-        direct_url = str(request.base_url).rstrip('/') + f"/direct/{movie_id}?token={current_user['token']}{item_type_param}"
+        direct_url = f"/direct/{movie_id}?token={current_user['token']}{item_type_param}"
         return {"mode": "direct", "direct_url": direct_url, "duration_seconds": duration, "soft_sub_url": soft_sub_url}
+        
     encode_upto = min(duration, seek_time + 15 * 60)
     session_id = str(time.time()).replace(".", "")
     hls_output_dir = os.path.join("static", "hls", str(movie_id), session_id)
     os.makedirs(hls_output_dir, exist_ok=True)
     active_processes[movie_id] = {"process": None, "dir": hls_output_dir}
     manifest_path = os.path.join(hls_output_dir, "stream.m3u8")
-    manifest_content = generate_vod_manifest(duration)
+    
+    # MODIFIED: Pass the token to the manifest generator
+    manifest_content = generate_vod_manifest(duration, current_user['token'])
     with open(manifest_path, "w") as f:
         f.write(manifest_content)
+        
     asyncio.create_task(asyncio.to_thread(run_ffmpeg_sync, movie_id, video_path, hls_output_dir, seek_time, encode_upto, crf, scaling_filter, burn_sub_path=sub_path if burn else None))
     async def wait_size_stable(paths, timeout_sec, min_size_bytes=32768):
         start_time = time.time()
@@ -547,7 +547,9 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
     segments_to_buffer = math.ceil(INITIAL_BUFFER_SECONDS / SEGMENT_DURATION_SEC)
     segment_paths = [os.path.join(hls_output_dir, f"stream{i}.ts") for i in range(segments_to_buffer)]
     await wait_size_stable(segment_paths, SEEK_WAIT_TIMEOUT_SECONDS if seek_time > 0 else INITIAL_BUFFER_SECONDS * 2)
-    playlist_url = f"/static/hls/{movie_id}/{session_id}/stream.m3u8"
+    
+    playlist_url = f"/static/hls/{movie_id}/{session_id}/stream.m3u8?token={current_user['token']}"
+    
     return {"hls_playlist_url": playlist_url, "crf_used": crf, "resolution_used": scale, "soft_sub_url": soft_sub_url}
 
 @app.delete("/stream/{movie_id}")
@@ -609,7 +611,6 @@ def create_library(library: dict = Body(..., embed=True), current_user=Depends(g
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Translate the path before saving to database
     original_path = library['path']
     container_path = _translate_host_path(original_path)
     
