@@ -4,7 +4,7 @@ import math
 import shutil
 import time
 import asyncio
-from typing import Optional
+from typing import Optional, Dict
 from fastapi.responses import StreamingResponse, FileResponse
 import subprocess
 import mimetypes
@@ -37,7 +37,60 @@ LMS_PUBLIC_URL = os.getenv("LMS_PUBLIC_URL", "http://localhost:8000")
 IDENTITY_SERVICE_URL = os.getenv("IDENTITY_SERVICE_URL", "http://localhost:8001")
 HEARTBEAT_INTERVAL_MINUTES = int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", 5))
 
-# Segment Waiter Helper
+# --- Path Translation Helper ---
+def _get_path_mappings() -> Dict[str, str]:
+    """
+    Parses the PATH_MAPPINGS environment variable into a dictionary.
+    Format: "HostPath1=>ContainerPath1,HostPath2=>ContainerPath2"
+    Returns: A dictionary like {'c:/movies': '/media/movies'}
+    """
+    mappings_str = os.getenv("PATH_MAPPINGS", "")
+    if not mappings_str:
+        return {}
+    
+    mappings = {}
+    for pair in mappings_str.split(','):
+        # Use '=>' as the delimiter to avoid ambiguity with Windows drive letters
+        if '=>' in pair:
+            host_path, container_path = pair.split('=>', 1)
+            # Normalize for comparison: lower-case and forward slashes
+            normalized_host_path = host_path.strip().lower().replace('\\', '/')
+            mappings[normalized_host_path] = container_path.strip()
+    return mappings
+
+PATH_MAPPINGS = _get_path_mappings()
+if PATH_MAPPINGS:
+    logging.info(f"Loaded path mappings for container: {PATH_MAPPINGS}")
+
+def _translate_host_path(host_path: str) -> str:
+    """
+    Translates a host path (e.g., from user input) to a container path if a mapping exists.
+    """
+    if not PATH_MAPPINGS:
+        return host_path
+
+    # Normalize the input path for comparison
+    normalized_host_path = host_path.strip().lower().replace('\\', '/')
+    
+    best_match = ""
+    for host_prefix in PATH_MAPPINGS.keys():
+        if normalized_host_path.startswith(host_prefix):
+            if len(host_prefix) > len(best_match):
+                best_match = host_prefix
+
+    if best_match:
+        container_prefix = PATH_MAPPINGS[best_match]
+        relative_path = normalized_host_path[len(best_match):]
+        # Use os.path.join for safety, ensuring correct separator handling.
+        # lstrip removes leading '/' from relative_path to prevent it from becoming the root.
+        translated_path = os.path.join(container_prefix, relative_path.lstrip('/\\'))
+        logging.info(f"Translated host path '{host_path}' to container path '{translated_path}'")
+        return translated_path
+        
+    logging.warning(f"No container mapping found for host path '{host_path}'. Using original path.")
+    return host_path
+
+# --- Segment Waiter Helper (and the rest of the file) ---
 async def wait_for_ready(path: str):
     MIN_SEG_BYTES = 32 * 1024
     STABILITY_CHECKS = 2
@@ -285,8 +338,7 @@ app.add_middleware(
     allow_origins=["http://localhost:5173", "https://lantern.henosis.us"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
-)
+    allow_headers=["*"],)
 
 class HLSStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
@@ -303,7 +355,6 @@ class HLSStaticFiles(StaticFiles):
 
 app.mount("/static", HLSStaticFiles(directory="static"), name="static")
 
-# --- FIX: Apply the gateway dependency to all routes in the routers ---
 app.include_router(history_router, dependencies=[Depends(get_user_from_gateway)])
 app.include_router(sub_router, dependencies=[Depends(get_user_from_gateway)])
 
@@ -557,11 +608,16 @@ def server_status(current_user=Depends(get_user_from_gateway)):
 def create_library(library: dict = Body(..., embed=True), current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # Translate the path before saving to database
+    original_path = library['path']
+    container_path = _translate_host_path(original_path)
+    
     try:
-        cursor.execute("INSERT INTO libraries (name, path, type) VALUES (?, ?, ?)", (library['name'], library['path'], library['type']))
+        cursor.execute("INSERT INTO libraries (name, path, type) VALUES (?, ?, ?)", (library['name'], container_path, library['type']))
         conn.commit()
         library_id = cursor.lastrowid
-        return {"id": library_id, "name": library['name'], "path": library['path'], "type": library['type']}
+        return {"id": library_id, "name": library['name'], "path": container_path, "type": library['type']}
     except sqlite3.IntegrityError:
         conn.close()
         raise HTTPException(status_code=409, detail="Library name must be unique")
