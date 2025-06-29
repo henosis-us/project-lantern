@@ -1,7 +1,7 @@
 # history.py
 from fastapi import APIRouter, Depends, Body, HTTPException, Query
 from database import get_db_connection
-from auth import get_current_user
+from auth import get_user_from_gateway  # FIXED: Changed from get_current_user to get_user_from_gateway
 
 router = APIRouter(prefix="/history", tags=["history"])
 
@@ -17,14 +17,14 @@ def _get_history_config(item_type: str):
 
 # --- MUST BE FIRST: Specific routes before dynamic ones ---
 @router.get("/continue/", summary="Get a list of items to continue watching")
-def continue_list(limit: int = 20, u=Depends(get_current_user)):
+def continue_list(limit: int = 20, current_user=Depends(get_user_from_gateway)):  # FIXED: Changed dependency
     """
     Gets a combined list of movies and TV episodes that are partially watched,
     ordered by the most recently watched.
     """
     conn = get_db_connection()
     # MODIFIED: Get username from the authenticated user object
-    username = u["username"]
+    username = current_user["username"]  # FIXED: Use current_user["username"]
     
     # Movie continue list
     movies = conn.execute("""
@@ -66,7 +66,8 @@ def save_progress(
         position_seconds: int = Body(..., ge=0, embed=True),
         duration_seconds: int = Body(..., ge=0, embed=True),
         item_type: str = Query(..., enum=["movie", "episode"]),
-        u=Depends(get_current_user)):
+        current_user=Depends(get_user_from_gateway)  # FIXED: Changed dependency
+):
     """
     Saves or updates the watch progress for a given movie or episode.
     If progress is over 90%, the item is considered "watched" and its
@@ -74,8 +75,8 @@ def save_progress(
     """
     table_name, id_column = _get_history_config(item_type)
     conn = get_db_connection()
-    # MODIFIED: Use u["username"] instead of u["id"]
-    username = u["username"]
+    # MODIFIED: Use current_user["username"] instead of any potential u["id"]
+    username = current_user["username"]  # FIXED: Use current_user["username"]
     
     finished_cutoff = 0.90
     if duration_seconds and (position_seconds / duration_seconds) >= finished_cutoff:
@@ -100,12 +101,13 @@ def save_progress(
 def get_progress(
         item_id: int,
         item_type: str = Query(..., enum=["movie", "episode"]),
-        u=Depends(get_current_user)):
+        current_user=Depends(get_user_from_gateway)  # FIXED: Changed dependency
+):
     """Retrieves the last saved watch position for a movie or episode."""
     table_name, id_column = _get_history_config(item_type)
     conn = get_db_connection()
-    # MODIFIED: Use u["username"] instead of u["id"]
-    username = u["username"]
+    # MODIFIED: Use current_user["username"] instead of u["id"]
+    username = current_user["username"]  # FIXED: Use current_user["username"]
     
     row = conn.execute(
         f"SELECT position_seconds, duration_seconds FROM {table_name} "
@@ -118,12 +120,13 @@ def get_progress(
 def clear_progress(
         item_id: int,
         item_type: str = Query(..., enum=["movie", "episode"]),
-        u=Depends(get_current_user)):
+        current_user=Depends(get_user_from_gateway)  # FIXED: Changed dependency
+):
     """Deletes the watch history for a specific movie or episode."""
     table_name, id_column = _get_history_config(item_type)
     conn = get_db_connection()
-    # MODIFIED: Use u["username"] instead of u["id"]
-    username = u["username"]
+    # MODIFIED: Use current_user["username"] instead of u["id"]
+    username = current_user["username"]  # FIXED: Use current_user["username"]
     
     conn.execute(
         f"DELETE FROM {table_name} WHERE username=? AND {id_column}=?",
