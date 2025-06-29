@@ -5,7 +5,7 @@ import shutil
 import time
 import asyncio
 from typing import Optional
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 import subprocess
 import mimetypes
 import requests
@@ -13,12 +13,11 @@ import sqlite3
 from fastapi import FastAPI, HTTPException, Response, BackgroundTasks, Body, Query, Header, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from starlette.requests import Request
 from database import get_db_connection, initialize_db
 from scanner import scan_and_update_library
 import re
-from auth import get_current_user, get_user_from_query
+from auth import get_user_from_gateway, get_user_from_query
 from history import router as history_router
 from subtitles import router as sub_router
 import logging
@@ -62,7 +61,6 @@ async def wait_for_ready(path: str):
         await asyncio.sleep(POLL_INTERVAL_SEC)
 
 active_processes = {}
-
 SEGMENT_DURATION_SEC = 10
 INITIAL_BUFFER_SECONDS = 30
 SEEK_WAIT_TIMEOUT_SECONDS = 20
@@ -225,25 +223,16 @@ async def heartbeat_task(server_unique_id: str):
 async def lifespan(app: FastAPI):
     # Startup logic
     print("Server starting up...")
-
-    # MODIFIED: Initialize the database on startup to ensure all tables exist.
-    # This must be done before any other database operations.
-    print("Initializing database schema...")
     initialize_db()
-    print("Database schema initialization complete.")
-
     hls_base_dir = os.path.join("static", "hls")
     if os.path.exists(hls_base_dir):
         shutil.rmtree(hls_base_dir)
     os.makedirs(hls_base_dir, exist_ok=True)
-
     print(f"Using configured LMS_PUBLIC_URL: {LMS_PUBLIC_URL}")
-
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM server_config WHERE key = 'server_unique_id'")
     unique_id_row = cursor.fetchone()
-
     if not unique_id_row:
         server_unique_id = str(uuid.uuid4())
         cursor.execute("INSERT INTO server_config (key, value) VALUES ('server_unique_id', ?)", (server_unique_id,))
@@ -252,23 +241,19 @@ async def lifespan(app: FastAPI):
     else:
         server_unique_id = unique_id_row['value']
         print(f"Existing server_unique_id found: {server_unique_id}")
-
     try:
         response = requests.post(f"{IDENTITY_SERVICE_URL}/servers/generate-claim-token", json={"server_id": server_unique_id}, timeout=10)
         response.raise_for_status()
         claim_token_data = response.json()
         claim_token = claim_token_data.get("claim_token")
-                
         cursor.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('claim_token', ?)", (claim_token,))
         conn.commit()
-
-        print("\n" + "="*50, flush=True)
-        print("🚀 Your Lantern Media Server is running!", flush=True)
-        print("To link this server to your account, enter the following details in the web UI:", flush=True)
-        print(f"  - Server URL:    {LMS_PUBLIC_URL}", flush=True)
-        print(f"  - Claim Token:   {claim_token}", flush=True)
-        print("="*50 + "\n", flush=True)
-
+        print("\n" + "="*50)
+        print("🚀 Your Lantern Media Server is running!")
+        print("To link this server to your account, enter the following details in the web UI:")
+        print(f"  - Server URL:    {LMS_PUBLIC_URL}")
+        print(f"  - Claim Token:   {claim_token}")
+        print("="*50 + "\n")
     except requests.RequestException as e:
         print("\n--- !!! CRITICAL STARTUP ERROR !!! ---")
         print(f"Could not get claim token from the Identity Service: {e}")
@@ -276,13 +261,10 @@ async def lifespan(app: FastAPI):
         print("--------------------------------------\n")
     finally:
         conn.close()
-
     print(f"Sending initial heartbeat for server {server_unique_id} with URL {LMS_PUBLIC_URL}")
     asyncio.create_task(send_heartbeat(server_unique_id))
     asyncio.create_task(heartbeat_task(server_unique_id))
-        
     yield
-        
     # Shutdown logic
     print("Server shutting down...")
     global active_processes
@@ -320,27 +302,29 @@ class HLSStaticFiles(StaticFiles):
         return resp
 
 app.mount("/static", HLSStaticFiles(directory="static"), name="static")
-app.include_router(history_router)
-app.include_router(sub_router)
+
+# --- FIX: Apply the gateway dependency to all routes in the routers ---
+app.include_router(history_router, dependencies=[Depends(get_user_from_gateway)])
+app.include_router(sub_router, dependencies=[Depends(get_user_from_gateway)])
 
 @app.get("/")
 def read_root():
     return {"Project": "Lantern", "Status": "Running"}
 
 @app.post("/library/scan")
-def trigger_scan(background_tasks: BackgroundTasks, current_user=Depends(get_current_user)):
+def trigger_scan(background_tasks: BackgroundTasks, current_user=Depends(get_user_from_gateway)):
     background_tasks.add_task(scan_and_update_library)
     return {"message": "Library scan started in the background."}
 
 @app.get("/library/movies")
-def get_movies(current_user=Depends(get_current_user)):
+def get_movies(current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     movies = conn.execute("SELECT id, title, overview, poster_path, duration_seconds, tmdb_id, parent_id FROM movies ORDER BY title").fetchall()
     conn.close()
     return [dict(movie) for movie in movies]
 
 @app.patch("/library/movies/{movie_id}/parent")
-def set_parent(movie_id: int, parent_id: int = Body(embed=True), current_user=Depends(get_current_user)):
+def set_parent(movie_id: int, parent_id: int = Body(embed=True), current_user=Depends(get_user_from_gateway)):
     if movie_id == parent_id:
         raise HTTPException(status_code=400, detail="movie_id and parent_id cannot be the same")
     conn = get_db_connection()
@@ -355,7 +339,7 @@ def set_parent(movie_id: int, parent_id: int = Body(embed=True), current_user=De
     return {"status": "ok", "movie_id": movie_id, "parent_id": parent_id}
 
 @app.get("/library/movies/{movie_id}/details")
-def movie_details(movie_id: int, current_user=Depends(get_current_user)):
+def movie_details(movie_id: int, current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     row = conn.execute("SELECT id, title, overview, poster_path, duration_seconds, tmdb_id, filepath, vote_average, genres, video_codec, audio_codec, is_direct_play FROM movies WHERE id=?", (movie_id,)).fetchone()
     if not row:
@@ -376,7 +360,7 @@ def movie_details(movie_id: int, current_user=Depends(get_current_user)):
     return movie_data
 
 @app.get("/library/series/{series_id}/details")
-def series_details(series_id: int, current_user=Depends(get_current_user)):
+def series_details(series_id: int, current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     row = conn.execute("SELECT id, title, overview, poster_path, first_air_date, vote_average, genres FROM series WHERE id=?", (series_id,)).fetchone()
     conn.close()
@@ -385,11 +369,11 @@ def series_details(series_id: int, current_user=Depends(get_current_user)):
     return dict(row)
 
 @app.get("/tmdb/search")
-def proxy_tmdb_search(q: str, year: Optional[str] = None, current_user=Depends(get_current_user)):
+def proxy_tmdb_search(q: str, year: Optional[str] = None, current_user=Depends(get_user_from_gateway)):
     return tmdb_search(q, year)
 
 @app.post("/library/movies/{movie_id}/set_tmdb")
-def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), current_user=Depends(get_current_user)):
+def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), current_user=Depends(get_user_from_gateway)):
     data = tmdb_details(tmdb_id)
     genres_list = [genre['name'] for genre in data.get('genres', [])]
     genres_str = ", ".join(genres_list) if genres_list else None
@@ -433,7 +417,7 @@ def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie
         return FileResponse(path=file_path, media_type=media_type, filename=os.path.basename(file_path))
 
 @app.get("/stream/{movie_id}")
-async def start_stream(request: Request, movie_id: int, seek_time: float = 0, prefer_direct: bool = Query(False), force_transcode: bool = Query(False), quality: str = Query("medium"), scale: str = Query("source"), subtitle_id: Optional[int] = Query(None), burn: bool = Query(False), item_type: str = Query("movie"), current_user=Depends(get_current_user)):
+async def start_stream(request: Request, movie_id: int, seek_time: float = 0, prefer_direct: bool = Query(False), force_transcode: bool = Query(False), quality: str = Query("medium"), scale: str = Query("source"), subtitle_id: Optional[int] = Query(None), burn: bool = Query(False), item_type: str = Query("movie"), current_user=Depends(get_user_from_gateway)):
     global active_processes
     if movie_id in active_processes:
         proc_info = active_processes.pop(movie_id)
@@ -516,7 +500,7 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
     return {"hls_playlist_url": playlist_url, "crf_used": crf, "resolution_used": scale, "soft_sub_url": soft_sub_url}
 
 @app.delete("/stream/{movie_id}")
-def stop_stream(movie_id: int, current_user=Depends(get_current_user)):
+def stop_stream(movie_id: int, current_user=Depends(get_user_from_gateway)):
     global active_processes
     if movie_id in active_processes:
         proc_info = active_processes.pop(movie_id)
@@ -526,14 +510,14 @@ def stop_stream(movie_id: int, current_user=Depends(get_current_user)):
     return Response(status_code=204)
 
 @app.get("/library/series")
-def list_series(current_user=Depends(get_current_user)):
+def list_series(current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     rows = conn.execute("SELECT id, title, overview, poster_path, first_air_date FROM series ORDER BY title").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 @app.get("/library/series/{series_id}/episodes")
-def list_episodes(series_id: int, season: Optional[int] = None, current_user=Depends(get_current_user)):
+def list_episodes(series_id: int, season: Optional[int] = None, current_user=Depends(get_user_from_gateway)):
     cols = "id, season, episode, title, overview, duration_seconds, air_date, extra_type, still_path"
     conn = get_db_connection()
     if season is None:
@@ -555,8 +539,8 @@ def get_claim_info():
         raise HTTPException(status_code=404, detail="Claim token not available.")
     return {"server_url": LMS_PUBLIC_URL, "claim_token": claim_token}
 
-@app.get("/server/status", response_model=dict)
-def server_status(current_user=Depends(get_current_user)):
+@app.get("/server/status")
+def server_status(current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM server_config WHERE key = 'server_unique_id'")
@@ -566,11 +550,11 @@ def server_status(current_user=Depends(get_current_user)):
     conn.close()
     server_unique_id = unique_id_row['value'] if unique_id_row else None
     claim_token = claim_token_row['value'] if claim_token_row else None
-    is_claimed = claim_token is None 
+    is_claimed = claim_token is None
     return {"is_claimed": is_claimed, "claim_token": claim_token if not is_claimed else None}
 
 @app.post("/libraries", status_code=201)
-def create_library(library: dict = Body(..., embed=True), current_user=Depends(get_current_user)):
+def create_library(library: dict = Body(..., embed=True), current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -585,7 +569,7 @@ def create_library(library: dict = Body(..., embed=True), current_user=Depends(g
         conn.close()
 
 @app.get("/libraries")
-def list_libraries(current_user=Depends(get_current_user)):
+def list_libraries(current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, name, path, type FROM libraries")
@@ -594,7 +578,7 @@ def list_libraries(current_user=Depends(get_current_user)):
     return [dict(lib) for lib in libraries]
 
 @app.delete("/libraries/{id}")
-def delete_library(id: int, current_user=Depends(get_current_user)):
+def delete_library(id: int, current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM libraries WHERE id = ?", (id,))
@@ -606,12 +590,12 @@ def delete_library(id: int, current_user=Depends(get_current_user)):
     return {"status": "ok"}
 
 @app.post("/sharing/invite")
-def share_invite(invite_request: dict = Body(..., embed=True), current_user: dict = Depends(get_current_user)):
+def share_invite(invite_request: dict = Body(..., embed=True), current_user: dict = Depends(get_user_from_gateway)):
     if not current_user.get("is_owner"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the server owner can share access.")
     identity_service_payload = {"server_unique_id": invite_request.get("server_unique_id"), "invitee_username": invite_request.get("invitee_identifier"), "resource_type": "full_access", "resource_id": "*"}
     if not identity_service_payload["server_unique_id"] or not identity_service_payload["invitee_username"]:
-         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing server_unique_id or invitee_identifier in the request body.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing server_unique_id or invitee_identifier in the request body.")
     try:
         response = requests.post(f"{IDENTITY_SERVICE_URL}/sharing/invite", json=identity_service_payload)
         response.raise_for_status()
