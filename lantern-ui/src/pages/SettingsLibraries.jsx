@@ -1,3 +1,5 @@
+// src/pages/SettingsLibraries.jsx
+
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 
@@ -6,7 +8,7 @@ const SettingsLibraries = () => {
   const [libraries, setLibraries] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-  
+
   // Form state for new library
   const [newName, setNewName] = useState('');
   const [newPath, setNewPath] = useState('');
@@ -17,9 +19,11 @@ const SettingsLibraries = () => {
     try {
       setIsLoading(true);
       const { data } = await mediaServerApi.get('/libraries');
-      setLibraries(data);
+      // MODIFIED: Ensure 'data' is an array. If it's null or not an array, use an empty array.
+      setLibraries(Array.isArray(data) ? data : []); 
     } catch (err) {
       setError('Failed to fetch libraries.');
+      setLibraries([]); // Also clear on error
     } finally {
       setIsLoading(false);
     }
@@ -28,6 +32,8 @@ const SettingsLibraries = () => {
   useEffect(() => {
     fetchLibraries();
   }, [mediaServerApi]);
+
+  // ... rest of the component is fine
 
   const handleAddLibrary = async (e) => {
     e.preventDefault();
