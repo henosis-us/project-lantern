@@ -3,11 +3,12 @@ import os
 import uuid
 import secrets
 import logging
+import json  # Import json for response rewriting
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse # MODIFIED: Import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from uuid import UUID
@@ -28,7 +29,7 @@ database.Base.metadata.create_all(bind=database.engine)
 app = FastAPI(title="Lantern Identity Service")
 
 # --- Middleware ---
-origins_from_env_str = os.getenv("ALLOWED_ORIGINS", "https://lantern.henosis.us,http://localhost:5173") # Allow localhost for local dev
+origins_from_env_str = os.getenv("ALLOWED_ORIGINS", "https://lantern.henosis.us,http://localhost:5173")  # Allow localhost for local dev
 configured_origins = [o.strip() for o in origins_from_env_str.split(',')]
 logging.info(f"CORS middleware configured with origins: {configured_origins}")
 
@@ -41,7 +42,8 @@ app.add_middleware(
 )
 
 # --- FastAPI Dependency for getting the current user from a token ---
-def get_current_user(db: Session = Depends(get_db), token: str = Depends(auth.oauth2_scheme)):
+# MODIFIED: Use the new flexible token getter auth.get_token
+def get_current_user(db: Session = Depends(get_db), token: str = Depends(auth.get_token)):
     payload = auth.decode_token(token)
     if not payload or not payload.get("sub"):
         raise HTTPException(
@@ -59,7 +61,7 @@ def get_current_user(db: Session = Depends(get_db), token: str = Depends(auth.oa
         )
     return user
 
-# --- NEW: Secure Gateway Logic ---
+# --- Secure Gateway Logic ---
 async def _get_permitted_server_url(server_unique_id: UUID, current_user: models.UserInDB, db: Session) -> str:
     """Helper to find a server and check if the user has permission to access it."""
     server = db.query(database.Server).filter(database.Server.server_unique_id == server_unique_id).first()
@@ -73,26 +75,27 @@ async def _get_permitted_server_url(server_unique_id: UUID, current_user: models
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server is currently offline or has not reported its address.")
     return server.local_url
 
-# --- PROXY FUNCTION with trusted header and proper resource management ---
-async def _proxy_request(server_url: str, request: Request, sub_path: str, current_user: models.UserInDB):
+# --- PROXY FUNCTION with trusted header and URL rewriting ---
+# MODIFIED: Added server_unique_id to parameters for URL rewriting
+async def _proxy_request(server_url: str, request: Request, sub_path: str, current_user: models.UserInDB, token: str, server_unique_id: UUID):
     """
-    Proxies a request to the target media server, adding a trusted header
-    with the authenticated user's information to break the auth validation loop.
-    
-    This version correctly manages the lifecycle of the httpx client and response
-    to ensure the stream is not closed prematurely.
+    Proxies a request to the target media server.
+    For stream initiation, it rewrites relative URLs in the JSON response
+    to be absolute, public-facing gateway URLs.
+    For all other requests, it streams the response directly.
     """
     headers_to_forward = {
         "X-Lantern-User": current_user.username,
         "X-Lantern-Is-Owner": "true" if request.state.is_owner else "false",
+        "X-Lantern-Token": token,
         "Content-Type": request.headers.get("Content-Type"),
         "Accept": request.headers.get("Accept"),
     }
     headers_to_forward = {k: v for k, v in headers_to_forward.items() if v is not None}
-    
-    client = httpx.AsyncClient()
+
+    # MODIFIED: Increase the timeout to 60 seconds (from previous fix)
+    client = httpx.AsyncClient(timeout=60.0)
     try:
-        # Build the request to be proxied
         proxied_req = client.build_request(
             method=request.method,
             url=f"{server_url.rstrip('/')}/{sub_path}",
@@ -100,11 +103,36 @@ async def _proxy_request(server_url: str, request: Request, sub_path: str, curre
             content=await request.body(),
             headers=headers_to_forward
         )
-        
-        # Send the request and get a streaming response
         proxied_resp = await client.send(proxied_req, stream=True)
 
-        # This generator will yield the response body and close resources upon completion
+        # Check if this is a stream initiation request (JSON response from /stream endpoint)
+        is_stream_init_request = sub_path.startswith("stream/") and proxied_resp.headers.get("Content-Type") == "application/json"
+
+        if is_stream_init_request:
+            # Buffer the small JSON response to rewrite it
+            response_content = await proxied_resp.aread()
+            await proxied_resp.aclose()
+            await client.aclose()
+            
+            data = json.loads(response_content)
+
+            # Construct the public base URL for the gateway
+            identity_public_url = os.getenv("IDENTITY_PUBLIC_URL", "https://lantern.henosis.us")
+            gateway_base = f"{identity_public_url.rstrip('/')}/gateway/{server_unique_id}"
+
+            # Rewrite relative URLs returned by the media server to be absolute gateway URLs
+            # These URLs will already contain the "?token=" query parameter from the media server
+            if data.get("hls_playlist_url"):
+                data["hls_playlist_url"] = f"{gateway_base}{data['hls_playlist_url']}"
+            if data.get("direct_url"):
+                data["direct_url"] = f"{gateway_base}{data['direct_url']}"
+            if data.get("soft_sub_url"):
+                data["soft_sub_url"] = f"{gateway_base}{data['soft_sub_url']}"
+
+            # MODIFIED: Use JSONResponse to automatically handle headers and content length.
+            return JSONResponse(content=data, status_code=proxied_resp.status_code)
+
+        # For all other requests (like fetching .ts segments or other API calls), stream directly
         async def stream_generator():
             try:
                 async for chunk in proxied_resp.aiter_raw():
@@ -114,7 +142,6 @@ async def _proxy_request(server_url: str, request: Request, sub_path: str, curre
                 await client.aclose()
 
         # Filter which headers to pass back to the client.
-        # It's unsafe to pass all headers, especially 'transfer-encoding'.
         response_headers = {
             "Content-Type": proxied_resp.headers.get("Content-Type"),
             "Content-Disposition": proxied_resp.headers.get("Content-Disposition"),
@@ -140,14 +167,16 @@ async def media_server_gateway(
     sub_path: str,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: models.UserInDB = Depends(get_current_user),
+    current_user: models.UserInDB = Depends(get_current_user), # Uses the new get_current_user
+    token: str = Depends(auth.get_token), # MODIFIED: Use the new flexible token getter
 ):
     """Secure gateway to proxy requests to media servers."""
     server_url = await _get_permitted_server_url(server_unique_id, current_user, db)
     # Attach is_owner state to the request for use in proxy
     server = db.query(database.Server).filter(database.Server.server_unique_id == server_unique_id).first()
     request.state.is_owner = (server.owner_id == current_user.id)
-    return await _proxy_request(server_url, request, sub_path, current_user)
+    # Pass server_unique_id to the proxy function for URL rewriting
+    return await _proxy_request(server_url, request, sub_path, current_user, token, server_unique_id)
 
 # --- Auth Endpoints ---
 @app.post("/auth/register", status_code=status.HTTP_201_CREATED, response_model=models.UserInDB)
