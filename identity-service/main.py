@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.responses import StreamingResponse, JSONResponse # MODIFIED: Import JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response # MODIFIED: Import JSONResponse and Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from uuid import UUID
@@ -67,12 +67,16 @@ async def _get_permitted_server_url(server_unique_id: UUID, current_user: models
     server = db.query(database.Server).filter(database.Server.server_unique_id == server_unique_id).first()
     if not server:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
     is_owner = server.owner_id == current_user.id
     permission = db.query(database.SharingPermission).filter_by(user_id=current_user.id, server_id=server.id).first()
+
     if not is_owner and not permission:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this server")
+
     if not server.local_url:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Server is currently offline or has not reported its address.")
+
     return server.local_url
 
 # --- PROXY FUNCTION with trusted header and URL rewriting ---
@@ -93,8 +97,8 @@ async def _proxy_request(server_url: str, request: Request, sub_path: str, curre
     }
     headers_to_forward = {k: v for k, v in headers_to_forward.items() if v is not None}
 
-    # MODIFIED: Increase the timeout to 60 seconds (from previous fix)
-    client = httpx.AsyncClient(timeout=60.0)
+    # MODIFIED: Increase the timeout to 300 seconds to handle long seeks (from previous fix)
+    client = httpx.AsyncClient(timeout=300.0) 
     try:
         proxied_req = client.build_request(
             method=request.method,
@@ -107,19 +111,18 @@ async def _proxy_request(server_url: str, request: Request, sub_path: str, curre
 
         # Check if this is a stream initiation request (JSON response from /stream endpoint)
         is_stream_init_request = sub_path.startswith("stream/") and proxied_resp.headers.get("Content-Type") == "application/json"
-
+        
         if is_stream_init_request:
             # Buffer the small JSON response to rewrite it
             response_content = await proxied_resp.aread()
             await proxied_resp.aclose()
             await client.aclose()
-            
+                        
             data = json.loads(response_content)
-
             # Construct the public base URL for the gateway
             identity_public_url = os.getenv("IDENTITY_PUBLIC_URL", "https://lantern.henosis.us")
             gateway_base = f"{identity_public_url.rstrip('/')}/gateway/{server_unique_id}"
-
+            
             # Rewrite relative URLs returned by the media server to be absolute gateway URLs
             # These URLs will already contain the "?token=" query parameter from the media server
             if data.get("hls_playlist_url"):
@@ -128,9 +131,17 @@ async def _proxy_request(server_url: str, request: Request, sub_path: str, curre
                 data["direct_url"] = f"{gateway_base}{data['direct_url']}"
             if data.get("soft_sub_url"):
                 data["soft_sub_url"] = f"{gateway_base}{data['soft_sub_url']}"
-
+            
             # MODIFIED: Use JSONResponse to automatically handle headers and content length.
             return JSONResponse(content=data, status_code=proxied_resp.status_code)
+
+        # NEW: Explicitly handle responses that have no body, like 204 No Content.
+        # This prevents the gateway from trying to stream a non-existent body,
+        # which causes errors when the media-server's DELETE /stream endpoint returns 204.
+        if proxied_resp.status_code == status.HTTP_204_NO_CONTENT:
+            await proxied_resp.aclose()
+            await client.aclose()
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
 
         # For all other requests (like fetching .ts segments or other API calls), stream directly
         async def stream_generator():
@@ -147,13 +158,12 @@ async def _proxy_request(server_url: str, request: Request, sub_path: str, curre
             "Content-Disposition": proxied_resp.headers.get("Content-Disposition"),
         }
         response_headers = {k: v for k, v in response_headers.items() if v is not None}
-
+        
         return StreamingResponse(
             stream_generator(),
             status_code=proxied_resp.status_code,
             headers=response_headers
         )
-
     except httpx.RequestError as e:
         # Ensure the client is closed even if the initial connection fails
         await client.aclose()
@@ -211,16 +221,21 @@ def validate_token(request: models.ValidateRequest, db: Session = Depends(get_db
     payload = auth.decode_token(request.token)
     if not payload or not payload.get("sub"):
         return models.ValidateResponse(is_valid=False)
+
     username = payload.get("sub")
     user = db.query(database.User).filter(database.User.username == username).first()
     server = db.query(database.Server).filter(database.Server.server_unique_id == request.server_unique_id).first()
+
     if not user or not server:
         return models.ValidateResponse(is_valid=False)
+
     if server.owner_id == user.id:
         return models.ValidateResponse(is_valid=True, username=user.username, is_owner=True)
+
     permission = db.query(database.SharingPermission).filter_by(user_id=user.id, server_id=server.id).first()
     if permission:
         return models.ValidateResponse(is_valid=True, username=user.username, is_owner=False)
+
     return models.ValidateResponse(is_valid=False)
 
 # --- Pydantic models for server management request bodies ---
@@ -262,9 +277,11 @@ def claim_server(
     token_record = db.query(database.ClaimToken).filter_by(token=claim_request.claim_token.upper()).first()
     if not token_record or token_record.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=404, detail="Claim token is invalid or has expired.")
+
     existing_server = db.query(database.Server).filter_by(server_unique_id=token_record.server_unique_id).first()
     if existing_server:
         raise HTTPException(status_code=409, detail="This server has already been claimed.")
+
     new_server = database.Server(
         server_unique_id=token_record.server_unique_id,
         owner_id=current_user.id,
@@ -275,9 +292,11 @@ def claim_server(
     db.delete(token_record)
     db.commit()
     db.refresh(new_server)
+
     # Construct the correct gateway URL for the response
     identity_base_url = os.getenv("IDENTITY_PUBLIC_URL", "https://lantern.henosis.us")
     gateway_url = f"{identity_base_url}/gateway/{new_server.server_unique_id}"
+    
     return models.ServerInfo(
         server_unique_id=new_server.server_unique_id,
         friendly_name=new_server.friendly_name,
@@ -290,7 +309,8 @@ def server_heartbeat(request: HeartbeatRequest, http_request: Request, db: Sessi
     """Called by a media server to update its local URL."""
     server = db.query(database.Server).filter_by(server_unique_id=request.server_unique_id).first()
     if not server:
-        return
+        return # Return 204 even if server not found, to not expose server details
+    
     server.local_url = request.url
     server.last_heartbeat = datetime.now(timezone.utc)
     db.commit()
@@ -305,10 +325,13 @@ def get_my_servers(
     """Gets a list of all servers a user owns or has been granted access to."""
     owned_servers = db.query(database.Server).filter_by(owner_id=current_user.id).all()
     permissions = db.query(database.SharingPermission).filter_by(user_id=current_user.id).all()
+    
     shared_server_ids = {p.server_id for p in permissions}
     shared_servers = db.query(database.Server).filter(database.Server.id.in_(shared_server_ids)).all()
+
     server_list = []
     identity_base_url = os.getenv("IDENTITY_PUBLIC_URL", "https://lantern.henosis.us")
+
     def create_server_info(s, is_owner):
         gateway_url = f"{identity_base_url}/gateway/{s.server_unique_id}"
         return models.ServerInfo(
@@ -317,10 +340,15 @@ def get_my_servers(
             last_known_url=gateway_url,
             is_owner=is_owner
         )
+
     for s in owned_servers:
         server_list.append(create_server_info(s, is_owner=True))
+    
     for s in shared_servers:
-        server_list.append(create_server_info(s, is_owner=False))
+        # Avoid duplicating if a server is both owned and shared (though sharing owner's server is prevented)
+        if s.owner_id != current_user.id: 
+            server_list.append(create_server_info(s, is_owner=False))
+            
     return server_list
 
 # --- Sharing Endpoints ---
@@ -329,13 +357,17 @@ def invite_user_to_server(request: models.InviteRequest, db: Session = Depends(g
     """Called by a media server (on behalf of its owner) to share access."""
     owner_server = db.query(database.Server).filter_by(server_unique_id=request.server_unique_id).first()
     invitee = db.query(database.User).filter_by(username=request.invitee_username).first()
+
     if not owner_server or not invitee:
         raise HTTPException(status_code=404, detail="Server or invitee user not found.")
+
     if owner_server.owner_id == invitee.id:
         raise HTTPException(status_code=400, detail="Cannot invite the server owner to their own server.")
+
     existing_perm = db.query(database.SharingPermission).filter_by(user_id=invitee.id, server_id=owner_server.id).first()
     if existing_perm:
         raise HTTPException(status_code=409, detail="User already has permission for this server.")
+
     new_permission = database.SharingPermission(
         user_id=invitee.id,
         server_id=owner_server.id,

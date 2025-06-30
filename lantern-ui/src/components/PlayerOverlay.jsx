@@ -1,9 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-// DELETED: import api from '../api/api';
-// DELETED: import { saveProgress, getProgress, clearProgress, getCurrentSubtitleSelection, setSubtitleSelection } from '../api/api';
-import { useAuth } from '../context/AuthContext'; // NEW: Import useAuth to get mediaServerApi
-
-import useHls from '../hooks/useHls';
+import { useAuth } from '../context/AuthContext';
+import useHls from '../hooks/useHls'; // This will also be updated below
 import useLocalStorage from '../hooks/useLocalStorage';
 import MiniPlayer from './MiniPlayer';
 import SettingsModal from './SettingsModal';
@@ -14,16 +11,16 @@ function PlayerOverlay({ movie, onClose }) {
   /* --------------- state --------------- */
   const [status, setStatus] = useState('loading');
   const [playbackUrl, setPlaybackUrl] = useState('');
+  // State to explicitly tell HLS.js where to start (0 for beginning, >0 for seek)
+  const [hlsStartTime, setHlsStartTime] = useState(0); 
+  
   const [isMinimized, setIsMinimized] = useState(false);
   const [openSettings, setOpenSettings] = useState(false);
   const [openSubtitles, setOpenSubtitles] = useState(false);
   const [progress, setProgress] = useState({ currentTime: 0, buffered: 0, duration: 0 });
   const [resume, setResume] = useState({ show: false, pos: 0 });
   const [chosenSubtitle, setChosenSubtitle] = useState(null);
-  const didLoadInitialSub = useRef(false);
-
-  // NEW: Get the dynamic mediaServerApi instance from the context
-  const { mediaServerApi } = useAuth(); 
+  const { mediaServerApi } = useAuth();
 
   /* --------------- user settings --------------- */
   const [settings, setSettings] = useLocalStorage('lanternSettings', {
@@ -35,27 +32,19 @@ function PlayerOverlay({ movie, onClose }) {
 
   /* --------------- refs --------------- */
   const videoRef = useRef(null);
-  const seekTimerRef = useRef(null);
-  const isSeekingRef = useRef(false);
-  const hasStartedRef = useRef(false);
-  const lastSentRef = useRef(0);
-  const initialSeekRef = useRef(0);
-  const userPausedRef = useRef(false); // *** FIX: Track if the user manually paused
+  const hasStartedRef = useRef(false); // Tracks if stream has been started at least once
+  const lastSentRef = useRef(0); // For throttling progress updates
+  const userPausedRef = useRef(false); // Tracks if user manually paused
+  const didLoadInitialSub = useRef(false); // Ensures subtitles are fetched only once initially
+  const seekDebounceTimer = useRef(null); // Timer for debouncing seek events
+  // *** THE CRITICAL FLAG ***: True when the application is actively initiating a stream (new play, seek, resume)
+  // This helps distinguish between user seeks and programmatic seeks by HLS.js
+  const isStreamStartingRef = useRef(false); 
 
   const isEpisode = movie && (movie.series_id !== undefined || movie.season !== undefined);
   const itemType = isEpisode ? 'episode' : 'movie';
 
   /* --------------- helpers --------------- */
-  const getNetworkGrade = () => {
-    const net = navigator.connection || {};
-    const mbps = net.downlink || 10;
-    if (mbps < 3) return 'low';
-    if (mbps < 10) return 'medium';
-    return 'high';
-  };
-
-  const shouldDirect = () => getNetworkGrade() === 'high';
-
   const fmtTime = (secs) => {
     if (isNaN(secs) || secs < 0) return '0:00';
     const h = Math.floor(secs / 3600);
@@ -64,44 +53,53 @@ function PlayerOverlay({ movie, onClose }) {
     return h ? `${h}:${m.toString().padStart(2, '0')}:${s}` : `${m}:${s}`;
   };
 
-  /* --------------- HLS hook --------------- */
-  const handleFragBuffered = useCallback(() => {
-    setStatus(s => (s === 'playing' ? s : 'playing'));
-  }, []);
-
-  useHls(
-    videoRef,
-    status !== 'direct' && status !== 'error' ? playbackUrl : null,
-    handleFragBuffered
-  );
-
-  /* --------------- start / restart stream with subtitle support --------------- */
+  /* --------------- HLS hook integration --------------- */
+  // Pass hlsStartTime to the useHls hook, telling HLS.js where to start in the manifest
+  useHls(videoRef, status !== 'direct' && status !== 'error' ? playbackUrl : null, hlsStartTime);
+  
+  /* --------------- Core stream management function --------------- */
   const startStream = useCallback(
     async (seek = 0) => {
-      // NEW: Ensure mediaServerApi is available
-      if (!movie || !mediaServerApi) return; 
-
+      if (!movie || !mediaServerApi) return;
+      
+      // *** Set the flag indicating a stream startup is in progress ***
+      isStreamStartingRef.current = true; 
       setStatus('loading');
-      initialSeekRef.current = seek;
-      setProgress(p => ({ ...p, currentTime: seek }));
+      setHlsStartTime(seek); // Tell HLS.js to start from this position
 
+      // Build parameters for the backend stream request
       const params = new URLSearchParams();
       params.append('item_type', itemType);
       params.append('seek_time', seek);
 
+      // Determine transcoding preferences based on settings
       if (settings.mode === 'direct') {
         params.append('prefer_direct', 'true');
       } else if (settings.mode === 'transcode') {
         params.append('force_transcode', 'true');
         params.append('quality', settings.quality);
-      } else {
-        shouldDirect()
-          ? params.append('prefer_direct', 'true')
-          : params.append('force_transcode', 'true') && params.append('quality', settings.quality);
+      } else { // 'auto' mode
+        // Simple network speed check (can be improved)
+        const getNetworkGrade = () => {
+            const net = navigator.connection || {};
+            const mbps = net.downlink || 10;
+            if (mbps < 3) return 'low';
+            if (mbps < 10) return 'medium';
+            return 'high';
+        };
+        const shouldDirect = () => getNetworkGrade() === 'high';
+
+        if (shouldDirect()) {
+            params.append('prefer_direct', 'true');
+        } else {
+            params.append('force_transcode', 'true');
+            params.append('quality', settings.quality);
+        }
       }
 
       if (settings.resolution !== 'source') params.append('scale', settings.resolution);
 
+      // Subtitle burning/soft-subs
       if (chosenSubtitle && settings.subs !== 'off') {
         params.append('subtitle_id', chosenSubtitle.id);
         if (settings.subs === 'burn') {
@@ -110,224 +108,263 @@ function PlayerOverlay({ movie, onClose }) {
       }
 
       try {
-        // Use mediaServerApi for the stream request
         const { data } = await mediaServerApi.get(`/stream/${movie.id}?${params.toString()}`);
-        
-        // NEW: Base URL for resolving relative paths should be from mediaServerApi
         const base = mediaServerApi.defaults.baseURL;
-
-        if (data.direct_url) data.direct_url = new URL(data.direct_url, base).href;
-        if (data.hls_playlist_url) data.hls_playlist_url = new URL(data.hls_playlist_url, base).href;
-
+        
         setProgress(p => ({ ...p, duration: data.duration_seconds || movie.duration_seconds }));
 
         if (data.mode === 'direct' || data.direct_url) {
-          setPlaybackUrl(data.direct_url);
+          // For direct play, HLS.js is not used, so we handle video element properties directly
+          if (videoRef.current) {
+            videoRef.current.src = new URL(data.direct_url, base).href;
+            videoRef.current.currentTime = seek; // Manually set seek time for direct play
+            videoRef.current.play().catch((e)=>{console.warn("Direct play autoplay prevented:", e);});
+          }
           setStatus('direct');
+          // Direct play doesn't involve HLS.js programmatic seeks, so clear flag here.
+          isStreamStartingRef.current = false; 
         } else {
-          setPlaybackUrl(data.hls_playlist_url);
-          setStatus('playing');
+          // For HLS, set the playlist URL. HLS.js will pick up hlsStartTime from its config.
+          setPlaybackUrl(new URL(data.hls_playlist_url, base).href);
         }
-
+        
+        // Handle soft subtitles if provided
         if (data.soft_sub_url && videoRef.current) {
+          // Remove old dynamic tracks
           [...videoRef.current.querySelectorAll('track[data-dynamic]')].forEach(t => t.remove());
           const v = videoRef.current;
           const t = document.createElement('track');
           t.kind = 'subtitles';
           t.label = 'Selected Subtitle';
-          t.srclang = chosenSubtitle ? chosenSubtitle.lang : 'en';
-          t.default = true;
+          t.srclang = chosenSubtitle ? chosenSubtitle.lang : 'en'; // Fallback to 'en'
+          t.default = true; // Make it default so it shows up
           t.src = new URL(data.soft_sub_url, base).href;
-          t.setAttribute('data-dynamic', '');
+          t.setAttribute('data-dynamic', ''); // Mark as dynamically added
+          // Ensure track mode is 'showing' when loaded
           t.addEventListener('load', () => { if (t.track) t.track.mode = 'showing'; });
           v.appendChild(t);
         }
       } catch (e) {
-        console.error(e);
+        console.error("Error starting stream:", e);
         setStatus('error');
+        // If stream fails to start, clear the flag to allow re-attempts
+        isStreamStartingRef.current = false; 
       }
     },
-    [movie, settings, chosenSubtitle, itemType, mediaServerApi] // NEW: Add mediaServerApi to dependency array
+    [movie, settings, chosenSubtitle, itemType, mediaServerApi]
   );
+  
+  /* --------------- Lifecycle Effects --------------- */
 
-  /* --------------- init first load with resume check --------------- */
+  // Effect for initial stream load and cleanup on component unmount
   useEffect(() => {
-    // NEW: Ensure movie and mediaServerApi are available
-    if (!movie || !mediaServerApi) return; 
+    if (!movie || !mediaServerApi) return;
 
     const init = async () => {
+      // Fetch current subtitle selection
       try {
-        // Use mediaServerApi for subtitle selection check
         const { data } = await mediaServerApi.get(`/subtitles/${movie.id}/current?item_type=${itemType}`);
         if (data && data.subtitle_id) {
           setChosenSubtitle({ id: data.subtitle_id, lang: data.lang || 'en' });
         }
-      } catch {/* ignore – default to no subs */ } finally { didLoadInitialSub.current = true; }
-      
+      } catch (err) { /* Ignore if no subtitle preference found */ } finally { didLoadInitialSub.current = true; }
+
+      // Check for watch history to offer resume
       try {
-        // Use mediaServerApi for progress check
         const { data = {} } = await mediaServerApi.get(`/history/${movie.id}?item_type=${itemType}`);
-        if (data.position_seconds > 0) {
+        // Only offer resume if position is significant (>5s into content)
+        if (data.position_seconds > 5) { 
           setResume({ show: true, pos: data.position_seconds });
         } else {
-          startStream(0);
+          startStream(0); // Start from beginning if no significant history
         }
-      } catch { startStream(0); }
+      } catch { 
+        startStream(0); // Start from beginning if history lookup fails
+      }
     };
 
+    // Trigger initial load only once
     if (movie && !hasStartedRef.current) {
       init();
       hasStartedRef.current = true;
     }
 
+    // Cleanup function: save progress and stop stream on component unmount
     return () => {
-      if (movie && mediaServerApi) mediaServerApi.delete(`/stream/${movie.id}`).catch(() => {}); // NEW: Use mediaServerApi
-      const v = videoRef.current;
-      if (movie && v && mediaServerApi) { // NEW: Check mediaServerApi
-        const ct = Math.floor(v.currentTime);
-        const dur = Math.floor(v.duration);
-        if (Number.isFinite(ct) && Number.isFinite(dur) && dur > 0 && ct > 5 && ct < dur - 5) {
-          // Use mediaServerApi for saving progress
-          mediaServerApi.put(
-            `/history/${movie.id}?item_type=${itemType}`,
-            { position_seconds: ct, duration_seconds: dur }
-          ).catch(() => {});
+      // Clear any pending debounce timers to prevent calls after unmount
+      clearTimeout(seekDebounceTimer.current);
+
+      // Tell the backend to stop the FFmpeg process
+      if (movie && mediaServerApi) {
+        mediaServerApi.delete(`/stream/${movie.id}`).catch((err) => console.error("Error stopping stream on backend:", err));
+        
+        // Save final watch progress
+        const v = videoRef.current;
+        if (v) { // Ensure video element exists before trying to read properties
+          const ct = Math.floor(v.currentTime);
+          const dur = Math.floor(v.duration);
+          // Only save if progress is significant and not at the very end
+          if (Number.isFinite(ct) && Number.isFinite(dur) && dur > 0 && ct > 5 && ct < dur - 5) {
+            mediaServerApi.put(
+              `/history/${movie.id}?item_type=${itemType}`,
+              { position_seconds: ct, duration_seconds: dur }
+            ).catch((err) => console.error("Failed to save final progress:", err));
+          }
         }
       }
     };
-  }, [movie, startStream, itemType, mediaServerApi]); // NEW: Add mediaServerApi to dependency array
+  }, [movie, startStream, itemType, mediaServerApi]);
 
-  /* --------------- handle subtitle change: restart stream --------------- */
+  // Effect to restart stream if subtitle choice changes (after initial load)
   useEffect(() => {
-    // NEW: Ensure movie and mediaServerApi are available
-    if (!movie || !didLoadInitialSub.current || !mediaServerApi) return; 
+    // Only trigger if subtitle has been initially loaded AND movie is defined
+    if (!movie || !didLoadInitialSub.current) return;
+    // Don't re-trigger if it's the very first time setting a subtitle after init.
+    // The initial startStream call already incorporates it.
+    if (didLoadInitialSub.current && hasStartedRef.current && chosenSubtitle !== undefined) {
+      const cur = videoRef.current ? Math.floor(videoRef.current.currentTime) : 0;
+      startStream(cur);
+    }
+  }, [chosenSubtitle, movie, startStream]);
 
-    const cur = videoRef.current ? Math.floor(videoRef.current.currentTime) : 0;
-    startStream(cur);
-  }, [chosenSubtitle, movie, startStream, mediaServerApi]); // NEW: Add mediaServerApi to dependency array
-
-  /* --------------- persist programmatic subtitle changes ---------- */
+  // Effect to persist subtitle preference to backend
   useEffect(() => {
-    // NEW: Ensure movie and mediaServerApi are available
-    if (!didLoadInitialSub.current || !movie || !mediaServerApi) return; 
-
-    // Use mediaServerApi for setting subtitle selection
+    // Only persist preference if initial subtitle load is complete
+    if (!didLoadInitialSub.current || !movie || !mediaServerApi) return;
     mediaServerApi.put(
-      `/subtitles/${movie.id}/select?item_type=${itemType}`, 
+      `/subtitles/${movie.id}/select?item_type=${itemType}`,
       { subtitle_id: chosenSubtitle ? chosenSubtitle.id : null }
-    ).catch(() => {});
-  }, [chosenSubtitle, movie, itemType, mediaServerApi]); // NEW: Add mediaServerApi to dependency array
+    ).catch((err) => console.error("Failed to persist subtitle selection:", err));
+  }, [chosenSubtitle, movie, itemType, mediaServerApi]);
+  
+  /* --------------- Event Handlers --------------- */
+  
+  // Debounced seek handler. Called by both onSeeking and onSeeked events.
+  const handleSeek = useCallback(() => {
+    // If the app is currently in the process of starting a stream, ignore seek events.
+    // This prevents HLS.js's programmatic seeks from triggering new stream requests.
+    if (isStreamStartingRef.current || status === 'direct' || !videoRef.current) {
+      return;
+    }
+    
+    // Clear any existing timer to ensure we only act after a pause in seeking
+    clearTimeout(seekDebounceTimer.current);
 
-  /* --------------- direct-play handling & auto-seek --------------- */
-  useEffect(() => {
-    if (status !== 'direct' || !playbackUrl || !videoRef.current) return;
-    const v = videoRef.current;
-    const tgt = initialSeekRef.current || 0;
-    const onLoaded = () => {
-      if (tgt > 0) { try { v.currentTime = tgt; } catch {} }
-      v.play().catch(() => {});
-    };
-    v.addEventListener('loadedmetadata', onLoaded, { once: true });
-    v.src = playbackUrl;
-    return () => v.removeEventListener('loadedmetadata', onLoaded);
-  }, [status, playbackUrl]);
+    // Set a new timer to call startStream after a short delay
+    seekDebounceTimer.current = setTimeout(() => {
+      // Re-check videoRef.current in case component unmounted during timeout
+      if (videoRef.current) { 
+        const seekTime = videoRef.current.currentTime;
+        console.log(`[Player] User seek complete. Restarting stream at ${seekTime.toFixed(2)}s.`);
+        startStream(seekTime);
+      }
+    }, 800); // Wait 800ms after the last seek event before restarting stream
+  }, [status, startStream]);
 
-  /* --------------- event handlers --------------- */
-  const onTimeUpdate = () => {
-    if (isSeekingRef.current) return;
+  const onTimeUpdate = useCallback(() => {
     const v = videoRef.current;
-    if (!v) return;
+    // Don't update or save progress if video is currently seeking OR paused by user
+    if (!v || v.seeking || userPausedRef.current) return; 
+
+    // Update frontend progress state
     setProgress(p => ({ ...p, currentTime: v.currentTime, duration: p.duration || v.duration }));
+    
+    // Throttle backend progress saving to every 15 seconds of actual playback
     if (Math.floor(v.currentTime) % 15 === 0 && v.currentTime - lastSentRef.current >= 15) {
       const ct = Math.floor(v.currentTime);
-      const dur = Math.floor(v.duration || progress.duration);
-      if (Number.isFinite(ct) && Number.isFinite(dur) && dur > 0 && mediaServerApi) { // NEW: Check mediaServerApi
-        // Use mediaServerApi for saving progress
+      const dur = Math.floor(v.duration || progress.duration); // Use stored duration if video.duration isn't final
+      if (Number.isFinite(ct) && Number.isFinite(dur) && dur > 0 && mediaServerApi) {
         mediaServerApi.put(
           `/history/${movie.id}?item_type=${itemType}`,
           { position_seconds: ct, duration_seconds: dur }
-        ).catch(() => {});
+        ).catch((err) => console.error("Failed to save progress:", err));
       }
-      lastSentRef.current = v.currentTime;
+      lastSentRef.current = v.currentTime; // Update last sent time
     }
-  };
+  }, [movie, itemType, progress.duration, mediaServerApi, userPausedRef]);
 
-  const onProgressUpdate = () => {
+  const onProgressUpdate = useCallback(() => {
     const v = videoRef.current;
     if (v && v.buffered.length) {
-      setProgress(p => ({ ...p, buffered: v.buffered.end(v.buffered.length - 1) }));
-      // *** FIX: Only auto-play if the user has NOT manually paused ***
-      if (v.paused && !isSeekingRef.current && status !== 'error' && !userPausedRef.current && (v.buffered.end(v.buffered.length - 1) - v.currentTime > 5)) {
-        v.play().catch(() => {});
+      const bufferedEnd = v.buffered.end(v.buffered.length - 1);
+      setProgress(p => ({ ...p, buffered: bufferedEnd }));
+
+      // Auto-play if paused (and not by user), not seeking, not in error, and has enough buffer
+      if (v.paused && !v.seeking && status !== 'error' && !userPausedRef.current && (bufferedEnd - v.currentTime > 2)) {
+        v.play().catch((e) => console.log("Autoplay on buffer prevented:", e));
       }
     }
-  };
+  }, [status, userPausedRef]);
 
-  const onSeeking = () => {
-    if (status === 'direct' || !isSeekingRef.current) return;
-    clearTimeout(seekTimerRef.current);
-    setStatus('loading');
-    seekTimerRef.current = setTimeout(() => startStream(videoRef.current.currentTime), 800);
-  };
+  const onWaiting = useCallback(() => {
+    // Set status to loading when video is buffering
+    if (status !== 'direct' && status !== 'error') {
+      setStatus('loading'); 
+    }
+  }, [status]);
 
-  const onWaiting = () => {
-    if (status !== 'direct') setStatus('loading');
-  };
+  const onPlaying = useCallback(() => {
+    // *** Clear the stream starting flag ***
+    // Once the video element reports 'playing', we consider the stream fully established.
+    if (isStreamStartingRef.current) {
+      isStreamStartingRef.current = false;
+      console.log("[Player] Video playing, seek detection re-enabled.");
+    }
+    // Transition from 'loading' to 'playing' when actual playback starts
+    if (status === 'loading') {
+      setStatus('playing');
+    }
+  }, [status]);
 
-  const onEnded = () => {
-    if (mediaServerApi) { // NEW: Check mediaServerApi
-      mediaServerApi.delete(`/history/${movie.id}?item_type=${itemType}`).catch(() => {}); // NEW: Use mediaServerApi
+  const onEnded = useCallback(() => {
+    // Clear watch history when media finishes playing
+    if (mediaServerApi) {
+      mediaServerApi.delete(`/history/${movie.id}?item_type=${itemType}`).catch((err) => console.error("Failed to clear history on end:", err));
     }
     setStatus('finished');
-  };
+  }, [movie, itemType, mediaServerApi]);
 
-  // *** FIX: Add handlers to track user pause/play actions ***
-  const handleUserPlay = () => {
-    userPausedRef.current = false;
-  };
-  const handleUserPause = () => {
-    // We only set the user pause ref if the pause is not due to seeking or buffering.
-    if (!isSeekingRef.current && status !== 'loading') {
+  const handleUserPlay = useCallback(() => {
+    userPausedRef.current = false; // User initiated play
+    const v = videoRef.current;
+    // Attempt to unmute if autoplay prevented it
+    if (v && v.muted) { v.muted = false; v.volume = 1; }
+  }, []);
+
+  const handleUserPause = useCallback(() => {
+    const v = videoRef.current;
+    // Only consider it a "user pause" if not already ended, seeking, or still loading
+    if (v && !v.ended && !v.seeking && status !== 'loading') {
       userPausedRef.current = true;
     }
-  };
+  }, [status]);
 
-  const handlePlayAutounmute = () => {
-    const v = videoRef.current;
-    if (v) { v.muted = false; v.volume = 1; }
-  };
+  const openSubtitlePicker = useCallback(() => setOpenSubtitles(true), []);
 
-  const openSubtitlePicker = () => setOpenSubtitles(true);
-
-  const handleSubtitleSelect = async (sub) => {
+  const handleSubtitleSelect = useCallback(async (sub) => {
     setChosenSubtitle(sub);
     setOpenSubtitles(false);
+  }, []); // Dependencies for this are handled by the useEffect for subtitle persistence
+
+  const doResume = useCallback(() => {
+    startStream(resume.pos);
+    setResume({ show: false, pos: 0 }); // Hide resume modal
+  }, [resume.pos, startStream]);
+
+  const doStartOver = useCallback(async () => {
     try {
-      if (mediaServerApi) { // NEW: Check mediaServerApi
-        // Use mediaServerApi for setting subtitle selection
-        await mediaServerApi.put(
-          `/subtitles/${movie.id}/select?item_type=${itemType}`, 
-          { subtitle_id: sub ? sub.id : null }
-        );
+      if (mediaServerApi) {
+        await mediaServerApi.delete(`/history/${movie.id}?item_type=${itemType}`); // Clear backend history
       }
-    } catch (err) { console.error('[SUB] failed to save subtitle selection', err); }
-  };
+    } catch (err) { console.error("Failed to clear progress (start over):", err); }
+    startStream(0); // Start stream from beginning
+    setResume({ show: false, pos: 0 }); // Hide resume modal
+  }, [movie, itemType, startStream, mediaServerApi]);
 
-  const doResume = () => { startStream(resume.pos); setResume({ show: false, pos: 0 }); };
-
-  const doStartOver = async () => {
-    try { 
-      if (mediaServerApi) { // NEW: Check mediaServerApi
-        await mediaServerApi.delete(`/history/${movie.id}?item_type=${itemType}`); // NEW: Use mediaServerApi
-      }
-    } catch (err) { console.error("Failed to clear progress", err); }
-    startStream(0);
-    setResume({ show: false, pos: 0 });
-  };
-
+  // Effect to toggle body class for minimized player styling
   useEffect(() => { document.body.classList.toggle('player-minimized', isMinimized); }, [isMinimized]);
 
-  if (!movie) return null;
+  if (!movie) return null; // Don't render if no movie data
 
   const bufferPct = progress.duration ? (progress.buffered / progress.duration) * 100 : 0;
 
@@ -372,26 +409,16 @@ function PlayerOverlay({ movie, onClose }) {
               playsInline
               muted
               crossOrigin="anonymous"
-              onPlay={() => {
-                handlePlayAutounmute();
-                handleUserPlay(); // *** FIX: Register play action
-              }}
-              onPause={handleUserPause} // *** FIX: Register pause action
-              onTimeUpdate={onTimeUpdate}
-              onProgress={onProgressUpdate}
-              onSeeking={onSeeking}
-              onWaiting={onWaiting}
-              onEnded={onEnded}
-              onCanPlay={() => {
-                const v = videoRef.current;
-                // *** FIX: Only auto-play if user has not paused
-                if (v && v.paused && !userPausedRef.current) {
-                  v.play().catch(() => {});
-                }
-                if (status === 'loading') {
-                  setStatus(status === 'direct' ? 'direct' : 'playing');
-                }
-              }}
+              onPlay={handleUserPlay} // Handles user clicking play
+              onPause={handleUserPause} // Handles user clicking pause
+              onTimeUpdate={onTimeUpdate} // Updates current playback time
+              onProgress={onProgressUpdate} // Updates buffered amount, attempts autoplay if stalled
+              onSeeking={handleSeek} // Called repeatedly while seeking
+              onSeeked={handleSeek} // Called once when seeking finishes
+              onWaiting={onWaiting} // Called when video is waiting for data
+              onEnded={onEnded} // Called when video finishes
+              onPlaying={onPlaying} // Called when video actually starts playing
+              onCanPlay={onPlaying} // Also useful for triggering onPlaying logic (e.g., after initial load)
             />
           </div>
         </div>
