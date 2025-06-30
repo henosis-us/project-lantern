@@ -10,7 +10,7 @@ import subprocess
 import mimetypes
 import requests
 import sqlite3
-from fastapi import FastAPI, HTTPException, Response, BackgroundTasks, Body, Query, Header, Depends
+from fastapi import FastAPI, HTTPException, Response, BackgroundTasks, Body, Query, Header, Depends, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
@@ -24,8 +24,8 @@ import logging
 import json
 import uuid
 import requests
-
 from dotenv import load_dotenv
+
 load_dotenv()
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -37,6 +37,59 @@ LMS_PUBLIC_URL = os.getenv("LMS_PUBLIC_URL", "http://localhost:8000")
 IDENTITY_SERVICE_URL = os.getenv("IDENTITY_SERVICE_URL", "http://localhost:8001")
 HEARTBEAT_INTERVAL_MINUTES = int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", 5))
 
+active_processes = {}
+SEGMENT_DURATION_SEC = 10
+QUALITY_PRESETS = {'low': 28, 'medium': 23, 'high': 18}
+RESOLUTION_PRESETS = {"source": None, "1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "eadf04bca50ce3477da06fffecca64e8a")
+TMDB_BASE = "https://api.themoviedb.org/3"
+
+# --- Hardware Acceleration Check ---
+HWACCEL_MODE = os.getenv("HWACCEL_MODE", "auto").lower() # e.g., "auto", "qsv", "nvenc", "none"
+HWACCEL_AVAILABLE = "none" # Default to none
+
+def check_hwaccel():
+    """Check for available hardware acceleration with a functional test."""
+    global HWACCEL_AVAILABLE
+
+    if HWACCEL_MODE == "none":
+        logging.info("Hardware acceleration is explicitly disabled. Using CPU.")
+        HWACCEL_AVAILABLE = "none"
+        return
+
+    # Check for NVIDIA NVENC with a functional test
+    if HWACCEL_MODE in ["auto", "nvenc"]:
+        try:
+            # First, check if encoder is listed to avoid unnecessary test runs
+            encoders_result = subprocess.run(['ffmpeg', '-v', 'quiet', '-encoders'], capture_output=True, text=True, check=True)
+            if 'h264_nvenc' in encoders_result.stdout:
+                # Now, perform a real (but quick) test transcode to null
+                test_cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=1:size=1280x720:rate=30', '-c:v', 'h264_nvenc', '-preset', 'p5', '-f', 'null', '-']
+                subprocess.run(test_cmd, capture_output=True, text=True, check=True, timeout=10)
+                logging.info("SUCCESS: NVIDIA NVENC hardware acceleration is available and functional.")
+                HWACCEL_AVAILABLE = "nvenc"
+                return
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logging.warning(f"NVENC check failed. It may be configured but not operational in this environment. Error: {e}")
+            pass # Continue to next check
+
+    # Check for Intel Quick Sync Video (QSV) with a functional test
+    if HWACCEL_MODE in ["auto", "qsv"]:
+         if os.path.exists("/dev/dri") and any("renderD" in s for s in os.listdir("/dev/dri")):
+            try:
+                encoders_result = subprocess.run(['ffmpeg', '-v', 'quiet', '-encoders'], capture_output=True, text=True, check=True)
+                if 'h264_qsv' in encoders_result.stdout:
+                    test_cmd = ['ffmpeg', '-y', '-hwaccel', 'qsv', '-f', 'lavfi', '-i', 'testsrc=duration=1:size=1280x720:rate=30', '-c:v', 'h264_qsv', '-preset', 'veryfast', '-f', 'null', '-']
+                    subprocess.run(test_cmd, capture_output=True, text=True, check=True, timeout=10)
+                    logging.info("SUCCESS: Intel QSV hardware acceleration is available and functional.")
+                    HWACCEL_AVAILABLE = "qsv"
+                    return
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+                logging.warning(f"QSV check failed. It may be configured but not operational. Error: {e}")
+
+    logging.warning("No functional hardware acceleration (NVENC/QSV) detected or enabled. Falling back to CPU transcoding (libx264).")
+    HWACCEL_AVAILABLE = "none"
+
 # --- Path Translation Helper ---
 def _get_path_mappings() -> Dict[str, str]:
     """Parses the PATH_MAPPINGS environment variable into a dictionary.
@@ -46,7 +99,7 @@ def _get_path_mappings() -> Dict[str, str]:
     mappings_str = os.getenv("PATH_MAPPINGS", "")
     if not mappings_str:
         return {}
-    
+            
     mappings = {}
     for pair in mappings_str.split(','):
         if '=>' in pair:
@@ -63,87 +116,75 @@ def _translate_host_path(host_path: str) -> str:
     """Translates a host path to a container path if a mapping exists."""
     if not PATH_MAPPINGS:
         return host_path
-    
+            
     normalized_host_path = host_path.strip().lower().replace('\\', '/')
-    
+            
     best_match = ""
     for host_prefix in PATH_MAPPINGS.keys():
         if normalized_host_path.startswith(host_prefix):
             if len(host_prefix) > len(best_match):
                 best_match = host_prefix
-
+    
     if best_match:
         container_prefix = PATH_MAPPINGS[best_match]
         relative_path = normalized_host_path[len(best_match):]
         translated_path = os.path.join(container_prefix, relative_path.lstrip('/\\'))
         logging.info(f"Translated host path '{host_path}' to container path '{translated_path}'")
         return translated_path
-            
+                    
     logging.warning(f"No container mapping found for host path '{host_path}'. Using original path.")
     return host_path
 
-# --- Segment Waiter Helper ---
+# --- Segment Waiter Helper (with increased timeout) ---
 async def wait_for_ready(path: str):
     MIN_SEG_BYTES = 32 * 1024
     STABILITY_CHECKS = 2
     POLL_INTERVAL_SEC = 0.25
-    SEG_TIMEOUT_SEC = 60
+    SEG_TIMEOUT_SEC = 120 # Increased timeout for slow transcodes
+
     start_time = time.time()
     stable_count = 0
     last_size = -1
+
     while True:
+        if time.time() - start_time > SEG_TIMEOUT_SEC:
+            raise FileNotFoundError(f"Segment not ready after {SEG_TIMEOUT_SEC}s: {path}")
+
         if os.path.exists(path):
             size = os.path.getsize(path)
             if size >= MIN_SEG_BYTES and size == last_size:
                 stable_count += 1
                 if stable_count >= STABILITY_CHECKS:
-                    return
+                    return # Segment is ready
             else:
                 stable_count = 0
             last_size = size
-        if time.time() - start_time > SEG_TIMEOUT_SEC:
-            raise FileNotFoundError(f"Segment not ready after {SEG_TIMEOUT_SEC}s: {path}")
+        
         await asyncio.sleep(POLL_INTERVAL_SEC)
 
-active_processes = {}
-SEGMENT_DURATION_SEC = 10
-INITIAL_BUFFER_SECONDS = 30
-SEEK_WAIT_TIMEOUT_SECONDS = 20
-SEEK_BUFFER_SEGMENTS = 5
-
-QUALITY_PRESETS = {'low': 28, 'medium': 23, 'high': 18}
-RESOLUTION_PRESETS = {"source": None, "1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
-
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", "eadf04bca50ce347da06fffecca64e8a")
-TMDB_BASE = "https://api.themoviedb.org/3"
-
-def tmdb_search(query: str, year: Optional[str] = None):
-    params = {"api_key": TMDB_API_KEY, "query": query}
-    if year:
-        params["year"] = year
-    try:
-        r = requests.get(f"{TMDB_BASE}/search/movie", params=params, timeout=10)
-        r.raise_for_status()
-        return r.json().get("results", [])
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"TMDb search error: {e}")
-
-def tmdb_details(tmdb_id: int):
-    params = {"api_key": TMDB_API_KEY}
-    try:
-        r = requests.get(f"{TMDB_BASE}/movie/{tmdb_id}", params=params, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"TMDb details error: {e}")
-
-# MODIFIED: Accept a token to append to segment URLs
+# --- Manifest Generator (Corrected and Final) ---
 def generate_vod_manifest(duration_seconds: int, token: str):
+    """
+    Generates a complete HLS VOD manifest for the entire duration of the media.
+    This is the correct approach for VOD playback, as it gives the player the
+    full timeline context.
+    """
     num_segments = math.ceil(duration_seconds / SEGMENT_DURATION_SEC)
-    manifest_lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{SEGMENT_DURATION_SEC}", "#EXT-X-PLAYLIST-TYPE:VOD"]
+    manifest_lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-TARGETDURATION:{SEGMENT_DURATION_SEC}",
+        "#EXT-X-PLAYLIST-TYPE:VOD"
+    ]
+
     for i in range(num_segments):
-        # MODIFIED: Append the token to each segment's URL
-        manifest_lines.extend([f"#EXTINF:{SEGMENT_DURATION_SEC:.6f},", f"stream{i}.ts?token={token}"])
+        segment_duration_at_end = min(SEGMENT_DURATION_SEC, duration_seconds - (i * SEGMENT_DURATION_SEC))
+        if segment_duration_at_end <= 0:
+             break
+        manifest_lines.extend([
+            f"#EXTINF:{segment_duration_at_end:.6f},",
+            f"stream{i}.ts?token={token}"
+        ])
     manifest_lines.append("#EXT-X-ENDLIST")
     return "\n".join(manifest_lines)
 
@@ -169,7 +210,7 @@ def probe_media_file(file_path: str) -> dict:
                 audio_codec_name = stream.get('codec_name')
                 channels = stream.get('channels')
                 if channels is None:
-                    channels = 6
+                    channels = 6 
                 codecs['a'] = {'name': audio_codec_name, 'channels': channels}
         return codecs
     except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
@@ -178,19 +219,24 @@ def probe_media_file(file_path: str) -> dict:
 
 def can_direct_play(path: str) -> bool:
     container = os.path.splitext(path)[1].lower()
-    if container not in {".mp4", ".m4v", ".webm"}:
+    if container not in {".mp4", ".m4v", ".webm"}: 
         return False
+
     codecs = probe_media_file(path)
     if not codecs:
         logging.warning(f"Could not probe codecs for {path}, assuming transcode is needed.")
         return False
+        
     video_codec = codecs.get('v')
     audio_info = codecs.get('a', {})
     audio_codec = audio_info.get('name')
     audio_channels = audio_info.get('channels')
+
     video_ok = video_codec in SAFE_VIDEO_CODECS if video_codec else False
     audio_ok = (audio_codec in SAFE_AUDIO_CODECS and audio_channels is not None and audio_channels <= SAFE_AUDIO_CHANNELS) if audio_codec else False
+        
     logging.info(f"Direct play check for '{os.path.basename(path)}': Video='{video_codec}' (safe: {video_ok}), Audio='{audio_codec}' @ {audio_channels}ch (safe: {audio_ok})")
+        
     return video_ok and audio_ok
 
 def range_streamer(file_path, start, end, size):
@@ -198,55 +244,164 @@ def range_streamer(file_path, start, end, size):
         f.seek(start)
         remaining = end - start + 1
         while remaining > 0:
-            chunk_size = min(1024 * 1024 * 2, remaining)
+            chunk_size = min(1024 * 1024 * 2, remaining) 
             data = f.read(chunk_size)
             if not data:
-                break
+                break 
             yield data
             remaining -= len(data)
 
-def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_time: float, end_time: float, crf: int, scaling_filter: list, burn_sub_path: Optional[str] = None):
-    global active_processes
+# --- FFmpeg Runner (Corrected and Final) ---
+def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_time: float, crf: int, scaling_filter: list, start_segment_number: int, burn_sub_path: Optional[str] = None):
+    global active_processes, HWACCEL_AVAILABLE
+    logging.info(f"[run_ffmpeg_sync] Starting for movie {movie_id}, output dir: {hls_output_dir}, seek: {seek_time}, start_segment: {start_segment_number}")
+
+    # --- Probe file for audio and video codec info ---
+    codecs = probe_media_file(video_path)
+    video_codec = codecs.get('v')
+    audio_info = codecs.get('a', {})
+    audio_codec_name = audio_info.get('name')
+    audio_channels = audio_info.get('channels', 2)
+
+    # --- Basic Arguments ---
     seek_args = []
     if seek_time > 1:
-        seek_args = ['-ss', str(seek_time), '-avoid_negative_ts', 'make_zero']
-    codecs = probe_media_file(video_path)
-    audio_info = codecs.get('a', {})
-    codec_name = audio_info.get('name')
-    channels = audio_info.get('channels')
+        # Use -ss before -i for fast seeking
+        seek_args = ['-ss', str(seek_time)]
+
+    # Input file argument needs to be after seek
+    input_args = ['-i', video_path]
+    
+    # --- Audio Transcoding Logic ---
     audio_args = []
-    if codec_name == 'aac' and channels and channels <= 2:
-        logging.info(f"Audio for {movie_id}: Copying existing AAC stereo track.")
+    if audio_codec_name == 'aac' and audio_channels <= 2:
+        logging.info(f"[run_ffmpeg_sync] Audio for {movie_id}: Copying existing AAC stereo track.")
         audio_args = ['-c:a', 'copy']
     else:
-        target_channels = min(channels or 2, 6)
-        bitrate = f"{128 * (target_channels // 2)}k"
-        logging.info(f"Audio for {movie_id}: Transcoding to {target_channels}-channel AAC at {bitrate}.")
+        target_channels = min(audio_channels or 2, 6) 
+        bitrate = f"{128 * (target_channels // 2)}k" 
+        logging.info(f"[run_ffmpeg_sync] Audio for {movie_id}: Transcoding to {target_channels}-channel AAC at {bitrate}.")
         audio_args = ['-c:a', 'aac', '-b:a', bitrate, '-ac', str(target_channels)]
-    keyframe_args = ['-force_key_frames', f"expr:gte(t,n_forced*{SEGMENT_DURATION_SEC})", '-g', str(int(SEGMENT_DURATION_SEC * 24)), '-keyint_min', str(int(SEGMENT_DURATION_SEC * 24))]
-    subs_filter = []
+
+    # --- Subtitle Burning Logic ---
+    final_vf = []
+    sub_filter_string = ""
+    scale_filter_string = ""
+
     if burn_sub_path:
-        subs_filter = ["-vf", f"subtitles={burn_sub_path}"]
-    ffmpeg_command = ['ffmpeg', *seek_args, '-to', str(end_time), '-i', video_path, *subs_filter, *keyframe_args, *scaling_filter, '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(crf), *audio_args, '-sn', '-f', 'segment', '-segment_time', str(SEGMENT_DURATION_SEC), '-segment_format', 'mpegts', '-segment_list_type', 'flat', '-segment_start_number', '0', '-sc_threshold', '0', 'stream%d.ts']
-    os.makedirs("logs", exist_ok=True)
+        # For Windows compatibility and path escaping, format path for ffmpeg filters.
+        # This replaces backslashes with forward slashes and escapes characters like ':'
+        sub_path_escaped = burn_sub_path.replace('\\', '/').replace(':', '\\\\:')
+        sub_filter_string = f"subtitles='{sub_path_escaped}'"
+        logging.info(f"[run_ffmpeg_sync] Burning in subtitles from: {burn_sub_path}")
+
+    if scaling_filter:
+        # scaling_filter is like ["-vf", "scale=..."]
+        scale_filter_string = scaling_filter[1]
+
+    # Chain the filters if both exist
+    if sub_filter_string and scale_filter_string:
+        final_vf = ["-vf", f"{scale_filter_string},{sub_filter_string}"]
+    elif sub_filter_string:
+        final_vf = ["-vf", sub_filter_string]
+    elif scale_filter_string:
+        final_vf = ["-vf", scale_filter_string]
+        
+    # --- Hardware Acceleration Command Logic (Decoding + Encoding) ---
+    hw_input_args = []
+    video_codec_args = []
+
+    if HWACCEL_AVAILABLE == "nvenc":
+        logging.info("[run_ffmpeg_sync] Using NVIDIA NVENC for transcoding.")
+        # Attempt to use hardware decoding if source is h264 or hevc
+        if video_codec == "h264":
+            hw_input_args = ['-hwaccel', 'cuda', '-c:v', 'h264_cuvid']
+        elif video_codec == "hevc":
+            hw_input_args = ['-hwaccel', 'cuda', '-c:v', 'hevc_cuvid']
+        
+        # Use NVENC encoder with quality settings
+        video_codec_args = ['-c:v', 'h264_nvenc', '-preset', 'p5', '-cq', str(crf)]
+        if hw_input_args:
+             logging.info(f"[run_ffmpeg_sync] Added HW decode args: {' '.join(hw_input_args)}")
+
+
+    elif HWACCEL_AVAILABLE == "qsv":
+        logging.info("[run_ffmpeg_sync] Using Intel QSV for transcoding.")
+        hw_input_args = ['-hwaccel', 'qsv', '-qsv_device', '/dev/dri/renderD128']
+        # Attempt to use hardware decoding for QSV
+        if video_codec == "h264":
+            hw_input_args.extend(['-c:v', 'h264_qsv'])
+        elif video_codec == "hevc":
+            hw_input_args.extend(['-c:v', 'hevc_qsv'])
+
+        # Use QSV encoder with quality settings
+        video_codec_args = ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', str(crf)]
+        if len(hw_input_args) > 2:
+             logging.info(f"[run_ffmpeg_sync] Added HW decode args: {' '.join(hw_input_args)}")
+
+    else: # Fallback to CPU
+        logging.info("[run_ffmpeg_sync] Using CPU (libx264) for transcoding.")
+        video_codec_args = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(crf)]
+
+    # --- Final Command Assembly ---
+    ffmpeg_command = [
+        'ffmpeg', '-hide_banner', *hw_input_args, *seek_args, *input_args,
+        *final_vf,
+        '-pix_fmt', 'yuv420p',
+        *video_codec_args,
+        *audio_args,
+        '-sn', '-f', 'segment',
+        '-segment_time', str(SEGMENT_DURATION_SEC),
+        '-segment_format', 'mpegts',
+        '-segment_list_type', 'flat',
+        '-segment_start_number', str(start_segment_number),
+        '-sc_threshold', '0',
+        '-force_key_frames', f"expr:gte(t,n_forced*{SEGMENT_DURATION_SEC})",
+        '-g', str(int(24 * 4)), # GOP size, e.g., 4 seconds at 24fps
+        'stream%d.ts'
+    ]
+        
     log_file_path = os.path.join(os.getcwd(), f"logs/ffmpeg_{movie_id}.log")
-    log_mode = "a" if seek_time > 1 else "w"
+    os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+    log_mode = "a" if seek_time > 1 else "w" 
+    logging.info(f"[run_ffmpeg_sync] FFmpeg log file: {log_file_path}, mode: {log_mode}")
+    logging.info(f"[run_ffmpeg_sync] Attempting to run FFmpeg command in cwd '{hls_output_dir}':")
+    logging.info(f"[run_ffmpeg_sync] {' '.join(ffmpeg_command)}")
+
     with open(log_file_path, log_mode) as log_file:
-        log_file.write(f"\n--- FFmpeg command for seek_time={seek_time:.2f}s, end_time={end_time:.2f}s, crf={crf} ---\n")
+        log_file.write(f"\n--- FFmpeg command for seek_time={seek_time:.2f}s, start_segment_number={start_segment_number}, crf={crf} ---\n")
         log_file.write(" ".join(ffmpeg_command) + "\n\n")
-        log_file.flush()
+        log_file.flush() 
+        
+        process = None 
         try:
             process = subprocess.Popen(ffmpeg_command, stdout=log_file, stderr=subprocess.STDOUT, cwd=hls_output_dir)
             active_processes[movie_id] = {"process": process, "dir": hls_output_dir}
-            logging.info(f"Started FFmpeg (PID: {process.pid}) for movie {movie_id} at seek time {seek_time:.2f}s.")
-            process.wait()
+            logging.info(f"[run_ffmpeg_sync] Started FFmpeg (PID: {process.pid}) for movie {movie_id}. Waiting for it to finish...")
+                        
+            process.wait() 
+                        
+            logging.info(f"[run_ffmpeg_sync] FFmpeg process for movie {movie_id} (PID: {getattr(process, 'pid', 'N/A')}) has finished. Exit code: {process.returncode}")
+            if process.returncode != 0:
+                logging.error(f"[run_ffmpeg_sync] FFmpeg process for movie {movie_id} exited with non-zero code {process.returncode}. Check {log_file_path} for full FFmpeg output.")
+            else:
+                logging.info(f"[run_ffmpeg_sync] FFmpeg process for movie {movie_id} completed successfully.")
+
+        except FileNotFoundError:
+            logging.error(f"[run_ffmpeg_sync] FFmpeg executable not found. Ensure FFmpeg is installed and in your system's PATH.")
         except Exception as e:
-            logging.error(f"FFmpeg failed to start for movie {movie_id}: {e}")
+            logging.error(f"[run_ffmpeg_sync] An unexpected error occurred while running FFmpeg for movie {movie_id}: {e}", exc_info=True)
+            if process and process.poll() is None: 
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    logging.warning(f"[run_ffmpeg_sync] Killed unresponsive FFmpeg process after error for movie {movie_id}.")
+        finally:
             if movie_id in active_processes:
                 del active_processes[movie_id]
-    if movie_id in active_processes:
-        del active_processes[movie_id]
-    logging.info(f"FFmpeg process for movie {movie_id} (seek time {seek_time:.2f}s) has finished.")
+            logging.info(f"[run_ffmpeg_sync] Cleanup: Process for movie {movie_id} removed from active_processes.")
 
 async def send_heartbeat(server_unique_id: str):
     """Sends a single heartbeat to the Identity Service."""
@@ -270,14 +425,16 @@ async def heartbeat_task(server_unique_id: str):
 async def lifespan(app: FastAPI):
     # Startup logic
     print("Server starting up...")
+    check_hwaccel() # Check for hardware acceleration on startup
     initialize_db()
     hls_base_dir = os.path.join("static", "hls")
     if os.path.exists(hls_base_dir):
-        shutil.rmtree(hls_base_dir)
-    os.makedirs(hls_base_dir, exist_ok=True)
-    print(f"Using configured LMS_PUBLIC_URL: {LMS_PUBLIC_URL}")
-    conn = get_db_connection()
-    cursor = conn.cursor()
+        shutil.rmtree(hls_base_dir)         
+        logging.info(f"Cleared old HLS cache directory: {hls_base_dir}")
+    os.makedirs(hls_base_dir, exist_ok=True)        
+    print(f"Using configured LMS_PUBLIC_URL: {LMS_PUBLIC_URL}")        
+    conn = get_db_connection()    
+    cursor = conn.cursor()        
     cursor.execute("SELECT value FROM server_config WHERE key = 'server_unique_id'")
     unique_id_row = cursor.fetchone()
     if not unique_id_row:
@@ -287,65 +444,74 @@ async def lifespan(app: FastAPI):
         print(f"Generated new server_unique_id: {server_unique_id}")
     else:
         server_unique_id = unique_id_row['value']
-        print(f"Existing server_unique_id found: {server_unique_id}")
-    try:
-        response = requests.post(f"{IDENTITY_SERVICE_URL}/servers/generate-claim-token", json={"server_id": server_unique_id}, timeout=10)
-        response.raise_for_status()
-        claim_token_data = response.json()
-        claim_token = claim_token_data.get("claim_token")
-        cursor.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('claim_token', ?)", (claim_token,))
-        conn.commit()
-        print("\n" + "="*50)
-        print("🚀 Your Lantern Media Server is running!")
-        print("To link this server to your account, enter the following details in the web UI:")
-        print(f"  - Server URL:    {LMS_PUBLIC_URL}")
-        print(f"  - Claim Token:   {claim_token}")
-        print("="*50 + "\n")
-    except requests.RequestException as e:
-        print("\n--- !!! CRITICAL STARTUP ERROR !!! ---")
-        print(f"Could not get claim token from the Identity Service: {e}")
-        print(f"Is the Identity Service running at {IDENTITY_SERVICE_URL}? ")
-        print("--------------------------------------\n")
-    finally:
+        print(f"Existing server_unique_id found: {server_unique_id}")        
+    try:        
+        response = requests.post(f"{IDENTITY_SERVICE_URL}/servers/generate-claim-token", json={"server_id": server_unique_id}, timeout=10)        
+        response.raise_for_status()        
+        claim_token_data = response.json()        
+        claim_token = claim_token_data.get("claim_token")                
+        cursor.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('claim_token', ?)", (claim_token,))        
+        conn.commit()                
+        print("\n" + "="*50)        
+        print("🚀 Your Lantern Media Server is running!")        
+        print("To link this server to your account, enter the following details in the web UI:")        
+        print(f"  - Server URL:    {LMS_PUBLIC_URL}")        
+        print(f"  - Claim Token:   {claim_token}")        
+        print("="*50 + "\n")    
+    except requests.RequestException as e:        
+        print("\n--- !!! CRITICAL STARTUP ERROR !!! ---")        
+        print(f"Could not get claim token from the Identity Service: {e}")        
+        print(f"Is the Identity Service running at {IDENTITY_SERVICE_URL}? ")        
+        print("--------------------------------------\n")    
+    finally:        
         conn.close()
-    print(f"Sending initial heartbeat for server {server_unique_id} with URL {LMS_PUBLIC_URL}")
-    asyncio.create_task(send_heartbeat(server_unique_id))
+    print(f"Sending initial heartbeat for server {server_unique_id} with URL {LMS_PUBLIC_URL}")    
+    asyncio.create_task(send_heartbeat(server_unique_id))    
     asyncio.create_task(heartbeat_task(server_unique_id))
-    yield
+    yield 
     # Shutdown logic
     print("Server shutting down...")
     global active_processes
     for movie_id, process_info in list(active_processes.items()):
         process = process_info.get("process")
         if process:
+            logging.info(f"Terminating FFmpeg process (PID: {process.pid}) for movie {movie_id} during shutdown.")
             process.terminate()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+                logging.warning(f"Killed unresponsive FFmpeg process for movie {movie_id} during shutdown.")
     print("All processes terminated.")
 
 app = FastAPI(title="Project Lantern", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://lantern.henosis.us"],
-    allow_credentials=True,
-    allow_methods=["*"],
+app.add_middleware(    
+    CORSMiddleware,    
+    allow_origins=["http://localhost:5173", "https://lantern.henosis.us"],    
+    allow_credentials=True,    
+    allow_methods=["*"],    
     allow_headers=["*"],
 )
 
-class HLSStaticFiles(StaticFiles):
-    async def get_response(self, path: str, scope):
-        if path.endswith(".ts"):
-            full_path = os.path.join(self.directory, path)
-            try:
-                await wait_for_ready(full_path)
-            except FileNotFoundError:
-                pass
-        resp = await super().get_response(path, scope)
-        if path.endswith(".vtt") or path.endswith(".ts"):
-            logging.info(f"[STATIC] {scope['method']} /static/{path} → {resp.status_code}")
+class HLSStaticFiles(StaticFiles):    
+    """    
+    Custom StaticFiles handler to wait for .ts segments to be ready    
+    before serving them, which is crucial for HLS transcoding.    
+    """    
+    async def get_response(self, path: str, scope):        
+        if path.endswith(".ts"):            
+            full_path = os.path.join(self.directory, path)            
+            logging.info(f"[HLSStaticFiles] Request for {path}. Full path: {full_path}")            
+            try:                
+                await wait_for_ready(full_path)                
+                logging.info(f"[HLSStaticFiles] Segment {path} is ready.")            
+            except FileNotFoundError as e:                
+                logging.error(f"[HLSStaticFiles] Segment {path} NOT ready (timeout or file missing). Error: {e}")                
+                return Response(status_code=404, content="Segment not found or not ready.")                
+        resp = await super().get_response(path, scope)        
+        if path.endswith(".vtt") or path.endswith(".ts"):            
+            logging.info(f"[STATIC] {scope['method']} /static/{path} -> {resp.status_code}")        
         return resp
 
 app.mount("/static", HLSStaticFiles(directory="static"), name="static")
@@ -394,6 +560,17 @@ def movie_details(movie_id: int, current_user=Depends(get_user_from_gateway)):
     movie_data = dict(row)
     if movie_data['overview'] is None and movie_data['tmdb_id'] is not None:
         try:
+            # Placeholder for tmdb_details - you need to implement this or import from a correct file
+            def tmdb_details(tmdb_id_val: int) -> dict:
+                try:
+                    url = f"{TMDB_BASE}/movie/{tmdb_id_val}?api_key={TMDB_API_KEY}"
+                    response = requests.get(url, timeout=5)
+                    response.raise_for_status()
+                    return response.json()
+                except requests.RequestException as e:
+                    logging.error(f"Failed to fetch TMDB details for ID {tmdb_id_val}: {e}")
+                    return {}
+
             tmdb_data = tmdb_details(movie_data['tmdb_id'])
             overview = tmdb_data.get('overview')
             if overview:
@@ -416,10 +593,25 @@ def series_details(series_id: int, current_user=Depends(get_user_from_gateway)):
 
 @app.get("/tmdb/search")
 def proxy_tmdb_search(q: str, year: Optional[str] = None, current_user=Depends(get_user_from_gateway)):
+    # Placeholder for tmdb_search - you need to implement this or import from a correct file
+    def tmdb_search(query: str, year: Optional[str] = None) -> dict:
+        try:
+            params = {"api_key": TMDB_API_KEY, "query": query}
+            if year:
+                params["year"] = year
+            url = f"{TMDB_BASE}/search/movie"
+            response = requests.get(url, params=params, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logging.error(f"Failed to search TMDB for query '{query}': {e}")
+            return {"results": []}
+
     return tmdb_search(q, year)
 
 @app.post("/library/movies/{movie_id}/set_tmdb")
 def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), current_user=Depends(get_user_from_gateway)):
+    # Re-using tmdb_details from above or assuming it's correctly imported
     data = tmdb_details(tmdb_id)
     genres_list = [genre['name'] for genre in data.get('genres', [])]
     genres_str = ", ".join(genres_list) if genres_list else None
@@ -438,13 +630,17 @@ def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie
     else:
         row = conn.execute("SELECT filepath FROM movies WHERE id = ?", (movie_id,)).fetchone()
     conn.close()
+
     if not row:
         raise HTTPException(status_code=404, detail=f"{item_type.capitalize()} not found")
+
     file_path = row["filepath"]
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File missing on disk")
+
     media_type, _ = mimetypes.guess_type(file_path)
     media_type = media_type or "application/octet-stream"
+
     range_header = request.headers.get("range")
     if range_header:
         match = re.match(r"bytes=(\d+)-(\d*)", range_header)
@@ -453,114 +649,179 @@ def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie
             end_str = match.group(2)
             size = os.path.getsize(file_path)
             end = min(int(end_str), size - 1) if end_str else size - 1
+
             if start > end or start < 0 or end >= size:
                 return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+                        
             length = end - start + 1
-            return StreamingResponse(range_streamer(file_path, start, end, size), status_code=206, headers={"Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(length), "Accept-Ranges": "bytes", "Content-Type": media_type})
+            return StreamingResponse(
+                range_streamer(file_path, start, end, size),
+                status_code=206,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{size}",
+                    "Content-Length": str(length),
+                    "Accept-Ranges": "bytes",
+                    "Content-Type": media_type
+                }
+            )
         else:
-            return Response(status_code=400, detail="Invalid range")
+            raise HTTPException(status_code=400, detail="Invalid range header format")
     else:
         return FileResponse(path=file_path, media_type=media_type, filename=os.path.basename(file_path))
 
 @app.get("/stream/{movie_id}")
 async def start_stream(request: Request, movie_id: int, seek_time: float = 0, prefer_direct: bool = Query(False), force_transcode: bool = Query(False), quality: str = Query("medium"), scale: str = Query("source"), subtitle_id: Optional[int] = Query(None), burn: bool = Query(False), item_type: str = Query("movie"), current_user=Depends(get_user_from_gateway)):
     global active_processes
+    logging.info(f"[start_stream] Request received for movie_id: {movie_id}, seek_time: {seek_time}, item_type: {item_type}")
+
+    # Existing process termination logic
     if movie_id in active_processes:
         proc_info = active_processes.pop(movie_id)
         proc = proc_info.get("process")
         if proc:
+            logging.info(f"[start_stream] Terminating existing FFmpeg process (PID: {proc.pid}) for movie {movie_id}.")
             proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                logging.warning(f"[start_stream] Killed unresponsive FFmpeg process for movie {movie_id}.")
+        # Clean up old HLS output directory
+        if os.path.exists(proc_info["dir"]):
+            try:
+                shutil.rmtree(proc_info["dir"])
+                logging.info(f"[start_stream] Removed old HLS directory: {proc_info['dir']}")
+            except OSError as e:
+                logging.error(f"[start_stream] Error removing old HLS directory {proc_info['dir']}: {e}")
+    else:
+        logging.info(f"[start_stream] No active FFmpeg process found for movie {movie_id} to terminate.")
+
     conn = get_db_connection()
     if item_type == "episode":
         item = conn.execute("SELECT filepath, duration_seconds FROM episodes WHERE id = ?", (movie_id,)).fetchone()
     else:
         item = conn.execute("SELECT filepath, duration_seconds FROM movies WHERE id = ?", (movie_id,)).fetchone()
     conn.close()
+
     if not item:
         raise HTTPException(status_code=404, detail=f"{item_type.capitalize()} not found")
     video_path, duration = item['filepath'], item['duration_seconds']
-    try:
-        crf = QUALITY_PRESETS[quality] if quality in QUALITY_PRESETS else int(quality)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid quality parameter")
-    if scale not in RESOLUTION_PRESETS:
-        raise HTTPException(status_code=400, detail=f"Invalid scale. Allowed: {', '.join(RESOLUTION_PRESETS)}")
-    target_height = RESOLUTION_PRESETS[scale]
-    scaling_filter = []
-    if target_height:
-        scaling_filter = ["-vf", f"scale=-2:'min({target_height},ih)'"]
-        force_transcode = True
+
+    # Subtitle processing
     sub_path, soft_sub_url = None, None
     if subtitle_id is not None:
         sub_conn = get_db_connection()
         if item_type == "movie":
             sub_row = sub_conn.execute("SELECT file_path FROM subtitles WHERE id = ? AND movie_id = ?", (subtitle_id, movie_id)).fetchone()
-        else:
+        else: # item_type == "episode"
             sub_row = sub_conn.execute("SELECT file_path FROM episode_subtitles WHERE id = ? AND episode_id = ?", (subtitle_id, movie_id)).fetchone()
         sub_conn.close()
+
         if not sub_row:
             raise HTTPException(status_code=404, detail="Subtitle not found for this item.")
+                
         full_sub_path = sub_row["file_path"]
         if burn:
-            force_transcode = True
-            sub_path = os.path.join(os.getcwd(), full_sub_path)
+            force_transcode = True # Must transcode to burn in subtitles
+            sub_path = os.path.abspath(full_sub_path)
         else:
-            soft_sub_url = f"/{full_sub_path}?token={current_user['token']}"
-            
+            soft_sub_url = f"/static/{full_sub_path}?token={current_user['token']}"
+            soft_sub_url = soft_sub_url.replace('\\', '/')
+
+    # Determine if direct play is possible and preferred
     if not force_transcode and prefer_direct and scale == "source" and can_direct_play(video_path):
         item_type_param = f"&item_type={item_type}" if item_type == "episode" else ""
         direct_url = f"/direct/{movie_id}?token={current_user['token']}{item_type_param}"
-        return {"mode": "direct", "direct_url": direct_url, "duration_seconds": duration, "soft_sub_url": soft_sub_url}
+        logging.info(f"[start_stream] Direct play enabled. Returning direct_url: {direct_url}")
+        return {
+            "mode": "direct",
+            "direct_url": direct_url,
+            "duration_seconds": duration,
+            "soft_sub_url": soft_sub_url         
+        }
+
+    # Transcoding required
+    try:
+        crf = QUALITY_PRESETS[quality] if quality in QUALITY_PRESETS else int(quality)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid quality parameter")
+
+    if scale not in RESOLUTION_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Invalid scale. Allowed: {', '.join(RESOLUTION_PRESETS)}")
         
-    encode_upto = min(duration, seek_time + 15 * 60)
-    session_id = str(time.time()).replace(".", "")
+    target_height = RESOLUTION_PRESETS[scale]
+    scaling_filter = []
+    if target_height:
+        scaling_filter = ["-vf", f"scale=-2:'min({target_height},ih)'"]
+        logging.info(f"[start_stream] Scaling filter applied: {scaling_filter}")
+
+    session_id = str(int(time.time() * 1000000))     
     hls_output_dir = os.path.join("static", "hls", str(movie_id), session_id)
     os.makedirs(hls_output_dir, exist_ok=True)
     active_processes[movie_id] = {"process": None, "dir": hls_output_dir}
-    manifest_path = os.path.join(hls_output_dir, "stream.m3u8")
+    logging.info(f"[start_stream] New HLS output directory created: {hls_output_dir}")
+
+    # Calculate the starting segment number for FFmpeg's benefit (performance)
+    start_segment_number_for_ffmpeg = math.floor(seek_time / SEGMENT_DURATION_SEC) if seek_time > 0 else 0
+    logging.info(f"[start_stream] Calculated start_segment_number for FFmpeg: {start_segment_number_for_ffmpeg} for seek_time: {seek_time}")
     
-    # MODIFIED: Pass the token to the manifest generator
+    manifest_path = os.path.join(hls_output_dir, "stream.m3u8")        
+    # IMPORTANT: Call generate_vod_manifest WITHOUT the start_segment_number.
+    # This ensures a full playlist is always created for the player's timeline.
     manifest_content = generate_vod_manifest(duration, current_user['token'])
     with open(manifest_path, "w") as f:
         f.write(manifest_content)
-        
-    asyncio.create_task(asyncio.to_thread(run_ffmpeg_sync, movie_id, video_path, hls_output_dir, seek_time, encode_upto, crf, scaling_filter, burn_sub_path=sub_path if burn else None))
-    async def wait_size_stable(paths, timeout_sec, min_size_bytes=32768):
-        start_time = time.time()
-        prev_sizes = [0] * len(paths)
-        stable_count = 0
-        while True:
-            all_ready = True
-            for i, path in enumerate(paths):
-                if not os.path.exists(path) or os.path.getsize(path) < min_size_bytes or os.path.getsize(path) != prev_sizes[i]:
-                    all_ready = False
-                prev_sizes[i] = os.path.getsize(path) if os.path.exists(path) else 0
-            if all_ready:
-                stable_count += 1
-                if stable_count >= 2:
-                    return
-            else:
-                stable_count = 0
-            if time.time() - start_time > timeout_sec:
-                raise FileNotFoundError("Timed out waiting for buffer to stabilize")
-            await asyncio.sleep(0.25)
-    segments_to_buffer = math.ceil(INITIAL_BUFFER_SECONDS / SEGMENT_DURATION_SEC)
-    segment_paths = [os.path.join(hls_output_dir, f"stream{i}.ts") for i in range(segments_to_buffer)]
-    await wait_size_stable(segment_paths, SEEK_WAIT_TIMEOUT_SECONDS if seek_time > 0 else INITIAL_BUFFER_SECONDS * 2)
-    
+    logging.info(f"[start_stream] Full HLS manifest written to: {manifest_path}")
+
+    # Launch FFmpeg as a background task, passing the correct start_segment_number for FFmpeg.    
+    logging.info(f"[start_stream] Launching FFmpeg for movie {movie_id} as background task...")
+    asyncio.create_task(asyncio.to_thread(        
+        run_ffmpeg_sync,        
+        movie_id,        
+        video_path,        
+        hls_output_dir,        
+        seek_time, # This is the actual seek_time for -ss        
+        crf,        
+        scaling_filter,        
+        start_segment_number_for_ffmpeg, # This is the crucial arg for FFmpeg's segment numbering        
+        burn_sub_path=sub_path     
+    ))
+    logging.info(f"[start_stream] FFmpeg task scheduled.")
+
     playlist_url = f"/static/hls/{movie_id}/{session_id}/stream.m3u8?token={current_user['token']}"
-    
-    return {"hls_playlist_url": playlist_url, "crf_used": crf, "resolution_used": scale, "soft_sub_url": soft_sub_url}
+    logging.info(f"[start_stream] Returning HLS playlist URL: {playlist_url}")
+    return {        
+        "hls_playlist_url": playlist_url,        
+        "crf_used": crf,        
+        "resolution_used": scale,        
+        "duration_seconds": duration,         
+        "soft_sub_url": soft_sub_url     
+    }
 
 @app.delete("/stream/{movie_id}")
 def stop_stream(movie_id: int, current_user=Depends(get_user_from_gateway)):
     global active_processes
+    logging.info(f"[stop_stream] Request received to stop stream for movie_id: {movie_id}")
     if movie_id in active_processes:
         proc_info = active_processes.pop(movie_id)
         proc = proc_info.get("process")
         if proc:
+            logging.info(f"[stop_stream] Terminating FFmpeg process (PID: {proc.pid}) for movie {movie_id} via DELETE request.")
             proc.terminate()
-    return Response(status_code=204)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                logging.warning(f"[stop_stream] Killed unresponsive FFmpeg process for movie {movie_id} via DELETE request.")
+        if os.path.exists(proc_info["dir"]):
+            try:
+                shutil.rmtree(proc_info["dir"])
+                logging.info(f"[stop_stream] Removed HLS directory: {proc_info['dir']}")
+            except OSError as e:
+                logging.error(f"[stop_stream] Error removing HLS directory {proc_info['dir']}: {e}")
+    else:
+        logging.info(f"[stop_stream] No active FFmpeg process found for movie {movie_id} to terminate.")
+    return Response(status_code=204) 
 
 @app.get("/library/series")
 def list_series(current_user=Depends(get_user_from_gateway)):
@@ -589,7 +850,7 @@ def get_claim_info():
     conn.close()
     claim_token = claim_token_row['value'] if claim_token_row else None
     if not claim_token:
-        raise HTTPException(status_code=404, detail="Claim token not available.")
+        raise HTTPException(status_code=404, detail="Claim token not available. Server might already be claimed.")
     return {"server_url": LMS_PUBLIC_URL, "claim_token": claim_token}
 
 @app.get("/server/status")
@@ -603,26 +864,24 @@ def server_status(current_user=Depends(get_user_from_gateway)):
     conn.close()
     server_unique_id = unique_id_row['value'] if unique_id_row else None
     claim_token = claim_token_row['value'] if claim_token_row else None
-    is_claimed = claim_token is None
+    is_claimed = claim_token is None     
     return {"is_claimed": is_claimed, "claim_token": claim_token if not is_claimed else None}
 
 @app.post("/libraries", status_code=201)
 def create_library(library: dict = Body(..., embed=True), current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
-    cursor = conn.cursor()
-    
+    cursor = conn.cursor()            
     original_path = library['path']
-    container_path = _translate_host_path(original_path)
-    
-    try:
-        cursor.execute("INSERT INTO libraries (name, path, type) VALUES (?, ?, ?)", (library['name'], container_path, library['type']))
-        conn.commit()
-        library_id = cursor.lastrowid
-        return {"id": library_id, "name": library['name'], "path": container_path, "type": library['type']}
-    except sqlite3.IntegrityError:
-        conn.close()
-        raise HTTPException(status_code=409, detail="Library name must be unique")
-    finally:
+    container_path = _translate_host_path(original_path)            
+    try:        
+        cursor.execute("INSERT INTO libraries (name, path, type) VALUES (?, ?, ?)", (library['name'], container_path, library['type']))        
+        conn.commit()        
+        library_id = cursor.lastrowid        
+        return {"id": library_id, "name": library['name'], "path": container_path, "type": library['type']}    
+    except sqlite3.IntegrityError:        
+        conn.close()        
+        raise HTTPException(status_code=409, detail="Library name must be unique")    
+    finally:        
         conn.close()
 
 @app.get("/libraries")
@@ -649,15 +908,20 @@ def delete_library(id: int, current_user=Depends(get_user_from_gateway)):
 @app.post("/sharing/invite")
 def share_invite(invite_request: dict = Body(..., embed=True), current_user: dict = Depends(get_user_from_gateway)):
     if not current_user.get("is_owner"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the server owner can share access.")
-    identity_service_payload = {"server_unique_id": invite_request.get("server_unique_id"), "invitee_username": invite_request.get("invitee_identifier"), "resource_type": "full_access", "resource_id": "*"}
-    if not identity_service_payload["server_unique_id"] or not identity_service_payload["invitee_username"]:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing server_unique_id or invitee_identifier in the request body.")
-    try:
-        response = requests.post(f"{IDENTITY_SERVICE_URL}/sharing/invite", json=identity_service_payload)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        if e.response is not None:
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail"))
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the server owner can share access.")        
+    identity_service_payload = {        
+        "server_unique_id": invite_request.get("server_unique_id"),         
+        "invitee_username": invite_request.get("invitee_identifier"),         
+        "resource_type": "full_access",         
+        "resource_id": "*"     
+    }
+    if not identity_service_payload["server_unique_id"] or not identity_service_payload["invitee_username"]:        
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing server_unique_id or invitee_identifier in the request body.")        
+    try:        
+        response = requests.post(f"{IDENTITY_SERVICE_URL}/sharing/invite", json=identity_service_payload)        
+        response.raise_for_status()         
+        return response.json()    
+    except requests.RequestException as e:        
+        if e.response is not None:            
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail"))        
         raise HTTPException(status_code=502, detail=f"Could not connect to Identity Service: {str(e)}")
