@@ -350,7 +350,7 @@ def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_ti
         '-pix_fmt', 'yuv420p',
         *video_codec_args,
         *audio_args,
-        '-sn', '-f', 'segment',
+        '-f', 'segment',
         '-segment_time', str(SEGMENT_DURATION_SEC),
         '-segment_format', 'mpegts',
         '-segment_list_type', 'flat',
@@ -360,6 +360,8 @@ def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_ti
         '-g', str(int(24 * 4)), # GOP size, e.g., 4 seconds at 24fps
         'stream%d.ts'
     ]
+    if not burn_sub_path:
+        ffmpeg_command.insert(ffmpeg_command.index('-f'), '-sn')
         
     log_file_path = os.path.join(os.getcwd(), f"logs/ffmpeg_{movie_id}.log")
     os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
@@ -672,7 +674,10 @@ def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie
 @app.get("/stream/{movie_id}")
 async def start_stream(request: Request, movie_id: int, seek_time: float = 0, prefer_direct: bool = Query(False), force_transcode: bool = Query(False), quality: str = Query("medium"), scale: str = Query("source"), subtitle_id: Optional[int] = Query(None), burn: bool = Query(False), item_type: str = Query("movie"), current_user=Depends(get_user_from_gateway)):
     global active_processes
-    logging.info(f"[start_stream] Request received for movie_id: {movie_id}, seek_time: {seek_time}, item_type: {item_type}")
+    logging.info(f"[start_stream] --- New Request ---")
+    logging.info(f"[start_stream] Movie ID: {movie_id}, Seek: {seek_time}, Item Type: {item_type}")
+    logging.info(f"[start_stream] Quality: {quality}, Scale: {scale}")
+    logging.info(f"[start_stream] Subtitle ID: {subtitle_id}, Burn: {burn}, Force Transcode: {force_transcode}")
 
     # Existing process termination logic
     if movie_id in active_processes:
@@ -706,10 +711,12 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
     if not item:
         raise HTTPException(status_code=404, detail=f"{item_type.capitalize()} not found")
     video_path, duration = item['filepath'], item['duration_seconds']
+    logging.info(f"[start_stream] Video path: {video_path}")
 
     # Subtitle processing
     sub_path, soft_sub_url = None, None
     if subtitle_id is not None:
+        logging.info(f"[start_stream] Processing subtitle_id: {subtitle_id}")
         sub_conn = get_db_connection()
         if item_type == "movie":
             sub_row = sub_conn.execute("SELECT file_path FROM subtitles WHERE id = ? AND movie_id = ?", (subtitle_id, movie_id)).fetchone()
@@ -718,15 +725,25 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
         sub_conn.close()
 
         if not sub_row:
+            logging.error(f"[start_stream] Subtitle with id {subtitle_id} not found for item {movie_id}.")
             raise HTTPException(status_code=404, detail="Subtitle not found for this item.")
                 
         full_sub_path = sub_row["file_path"]
+        logging.info(f"[start_stream] Found subtitle path in DB: {full_sub_path}")
+        
         if burn:
             force_transcode = True # Must transcode to burn in subtitles
             sub_path = os.path.abspath(full_sub_path)
+            logging.info(f"[start_stream] Burn-in requested. Absolute subtitle path: {sub_path}")
+            if not os.path.exists(sub_path):
+                logging.error(f"[start_stream] Subtitle file for burning does not exist at: {sub_path}")
+                raise HTTPException(status_code=404, detail="Subtitle file not found on disk.")
         else:
             soft_sub_url = f"/static/{full_sub_path}?token={current_user['token']}"
             soft_sub_url = soft_sub_url.replace('\\', '/')
+            logging.info(f"[start_stream] Soft subtitle URL generated: {soft_sub_url}")
+    else:
+        logging.info("[start_stream] No subtitle_id provided.")
 
     # Determine if direct play is possible and preferred
     if not force_transcode and prefer_direct and scale == "source" and can_direct_play(video_path):
@@ -741,6 +758,7 @@ async def start_stream(request: Request, movie_id: int, seek_time: float = 0, pr
         }
 
     # Transcoding required
+    logging.info("[start_stream] Transcoding required.")
     try:
         crf = QUALITY_PRESETS[quality] if quality in QUALITY_PRESETS else int(quality)
     except ValueError:
