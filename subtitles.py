@@ -141,7 +141,7 @@ def download_subtitle(
         
         # 3. Define local paths and final DB path
         sub_dir.mkdir(exist_ok=True)
-        vtt_relative_path = Path(url_prefix.lstrip('/')) / f"{local_sub_id}.vtt"
+        vtt_relative_path = Path('subtitles') / item_type / str(media_id) / f"{local_sub_id}.vtt"
         srt_path = sub_dir / f"{local_sub_id}.srt"
         vtt_path = sub_dir / f"{local_sub_id}.vtt"
 

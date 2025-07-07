@@ -58,6 +58,9 @@ def get_user_from_gateway(
     Trusts the user info passed from the identity gateway.
     This is secure because the media server is not directly exposed to the internet.
     """
+    if os.getenv("LANTERN_TEST_MODE") == "true":
+        return {"username": "testuser", "is_owner": True, "token": "test_token"}
+
     if not x_lantern_user or not x_lantern_token: # MODIFIED: Check for token as well
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

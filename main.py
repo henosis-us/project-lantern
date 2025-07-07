@@ -501,8 +501,8 @@ class HLSStaticFiles(StaticFiles):
     Custom StaticFiles handler to wait for .ts segments to be ready    
     before serving them, which is crucial for HLS transcoding.    
     """    
-    async def get_response(self, path: str, scope):        
-        if path.endswith(".ts"):            
+    async def get_response(self, path: str, scope):
+        if path.endswith((".ts", ".m3u8")):            
             full_path = os.path.join(self.directory, path)            
             logging.info(f"[HLSStaticFiles] Request for {path}. Full path: {full_path}")            
             try:                
