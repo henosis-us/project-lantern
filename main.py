@@ -28,7 +28,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(
+    filename='tmdb.log',  # Log file path (will be created in the current working directory)
+    filemode='a',         # Append mode to avoid overwriting existing logs
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+# Add a stream handler for console output (so logs show in stdout too)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+logging.getLogger().addHandler(console_handler)
+
+# Test log to confirm logging is working on startup
+logging.info("TMDb logging initialized. Check tmdb.log for details.")
 mimetypes.add_type("video/mp2t", ".ts")
 mimetypes.add_type("text/vtt", ".vtt")
 
@@ -41,7 +53,7 @@ active_processes = {}
 SEGMENT_DURATION_SEC = 10
 QUALITY_PRESETS = {'low': 28, 'medium': 23, 'high': 18}
 RESOLUTION_PRESETS = {"source": None, "1080p": 1080, "720p": 720, "480p": 480, "360p": 360}
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", "eadf04bca50ce3477da06fffecca64e8a")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 TMDB_BASE = "https://api.themoviedb.org/3"
 
 # --- Hardware Acceleration Check ---
@@ -135,32 +147,42 @@ def _translate_host_path(host_path: str) -> str:
     logging.warning(f"No container mapping found for host path '{host_path}'. Using original path.")
     return host_path
 
-# --- Segment Waiter Helper (with increased timeout) ---
-async def wait_for_ready(path: str):
-    MIN_SEG_BYTES = 32 * 1024
-    STABILITY_CHECKS = 2
-    POLL_INTERVAL_SEC = 0.25
-    SEG_TIMEOUT_SEC = 120 # Increased timeout for slow transcodes
+# --- Segment / Playlist Waiter Helper (adaptive thresholds) ---
+async def wait_for_ready(path: str) -> None:
 
-    start_time = time.time()
-    stable_count = 0
-    last_size = -1
+    # Pick thresholds based on extension
+    if path.endswith((".m3u8", ".vtt")):
+        min_bytes          = 128          # playlist / subtitle files are tiny
+        stability_checks   = 1            # only need one identical size sample
+    else:
+        min_bytes          = 32 * 1024    # transport segments should be > 32 KiB
+        stability_checks   = 2            # need two identical size samples
+
+    poll_interval_sec = 0.25
+    seg_timeout_sec   = 120
+
+    start_time      = time.time()
+    stable_count    = 0
+    last_size       = -1
 
     while True:
-        if time.time() - start_time > SEG_TIMEOUT_SEC:
-            raise FileNotFoundError(f"Segment not ready after {SEG_TIMEOUT_SEC}s: {path}")
+        if time.time() - start_time > seg_timeout_sec:
+            raise FileNotFoundError(f"Segment not ready after {seg_timeout_sec}s: {path}")
 
         if os.path.exists(path):
             size = os.path.getsize(path)
-            if size >= MIN_SEG_BYTES and size == last_size:
+
+            # Only count this sample if it meets the minimum-size requirement
+            if size >= min_bytes and size == last_size:
                 stable_count += 1
-                if stable_count >= STABILITY_CHECKS:
-                    return # Segment is ready
+                if stable_count >= stability_checks:
+                    return  # Ready!
             else:
                 stable_count = 0
+
             last_size = size
-        
-        await asyncio.sleep(POLL_INTERVAL_SEC)
+
+        await asyncio.sleep(poll_interval_sec)
 
 # --- Manifest Generator (Corrected and Final) ---
 def generate_vod_manifest(duration_seconds: int, token: str):
@@ -562,18 +584,8 @@ def movie_details(movie_id: int, current_user=Depends(get_user_from_gateway)):
     movie_data = dict(row)
     if movie_data['overview'] is None and movie_data['tmdb_id'] is not None:
         try:
-            # Placeholder for tmdb_details - you need to implement this or import from a correct file
-            def tmdb_details(tmdb_id_val: int) -> dict:
-                try:
-                    url = f"{TMDB_BASE}/movie/{tmdb_id_val}?api_key={TMDB_API_KEY}"
-                    response = requests.get(url, timeout=5)
-                    response.raise_for_status()
-                    return response.json()
-                except requests.RequestException as e:
-                    logging.error(f"Failed to fetch TMDB details for ID {tmdb_id_val}: {e}")
-                    return {}
-
-            tmdb_data = tmdb_details(movie_data['tmdb_id'])
+            # THE LOCAL DEFINITION WAS REMOVED FROM HERE
+            tmdb_data = tmdb_details(movie_data['tmdb_id']) # Now calls the global helper
             overview = tmdb_data.get('overview')
             if overview:
                 conn.execute("UPDATE movies SET overview = ? WHERE id = ?", (overview, movie_id))
@@ -595,22 +607,49 @@ def series_details(series_id: int, current_user=Depends(get_user_from_gateway)):
 
 @app.get("/tmdb/search")
 def proxy_tmdb_search(q: str, year: Optional[str] = None, current_user=Depends(get_user_from_gateway)):
-    # Placeholder for tmdb_search - you need to implement this or import from a correct file
     def tmdb_search(query: str, year: Optional[str] = None) -> dict:
+        url = f"{TMDB_BASE}/search/movie"
+        params = {"api_key": TMDB_API_KEY, "query": query}
+        if year:
+            params["year"] = year
+        
+        # Log the request details before sending
+        logging.debug(f"[TMDb] Preparing request: URL={url}, Params={params}, Query='{query}', Year='{year}'")
+        
         try:
-            params = {"api_key": TMDB_API_KEY, "query": query}
-            if year:
-                params["year"] = year
-            url = f"{TMDB_BASE}/search/movie"
-            response = requests.get(url, params=params, timeout=5)
-            response.raise_for_status()
-            return response.json()
+            # Make the request with increased timeout for debugging
+            resp = requests.get(url, params=params, timeout=15)  # Increased timeout to 15s to catch slow responses
+            # Log the full response details
+            logging.debug(f"[TMDb] Request completed: URL={resp.url}, Status Code={resp.status_code}, Response Body={resp.text[:500]}")  # Log first 500 chars of body
+            resp.raise_for_status()  # Raise HTTPError if status is not 200-299
+            return resp.json()
+        except requests.HTTPError as e:
+            # Handle HTTP errors (e.g., 401, 429) with detailed logging
+            if e.response:
+                status = e.response.status_code
+                body = e.response.text[:500]  # Truncate body to avoid large logs
+                logging.error(f"[TMDb] HTTPError for query '{query}': status={status}, body={body}")
+            else:
+                logging.error(f"[TMDb] HTTPError for query '{query}' with no response: {e}")
+            raise HTTPException(status_code=502, detail=f"TMDb error: {str(e)}")
         except requests.RequestException as e:
-            logging.error(f"Failed to search TMDB for query '{query}': {e}")
-            return {"results": []}
+            # Handle general request exceptions (e.g., connection errors, timeouts)
+            logging.error(f"[TMDb] RequestException for query '{query}': Exception Type={type(e).__name__}, Message={str(e)}")
+            raise HTTPException(status_code=502, detail="Could not reach TMDb: " + str(e))
 
     return tmdb_search(q, year)
-
+def tmdb_details(tmdb_id_val: int) -> dict:
+    """Fetches full movie details from TMDb for a given ID."""
+    try:
+        if not TMDB_API_KEY:
+            raise ValueError("TMDB API key is not configured.")
+        url = f"{TMDB_BASE}/movie/{tmdb_id_val}?api_key={TMDB_API_KEY}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as e:
+        logging.error(f"Failed to fetch TMDb details for ID {tmdb_id_val}: {e}")
+        return {}
 @app.post("/library/movies/{movie_id}/set_tmdb")
 def set_tmdb(movie_id: int, tmdb_id: int = Body(embed=True), current_user=Depends(get_user_from_gateway)):
     # Re-using tmdb_details from above or assuming it's correctly imported
