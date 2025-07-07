@@ -62,6 +62,7 @@ function PlayerOverlay({ movie, onClose }) {
       setStatus('loading');
       setHlsStartTime(seek);
 
+      console.log("[Player] startStream called. chosenSubtitle:", chosenSubtitle);
       const params = new URLSearchParams();
       params.append('item_type', itemType);
       params.append('seek_time', seek);
@@ -87,7 +88,7 @@ function PlayerOverlay({ movie, onClose }) {
         }
       }
       if (settings.resolution !== 'source') params.append('scale', settings.resolution);
-      if (chosenSubtitle && settings.subs !== 'off') {
+      if (chosenSubtitle) {
         params.append('subtitle_id', chosenSubtitle.id);
         if (settings.subs === 'burn') {
           params.append('burn', 'true');
@@ -113,17 +114,47 @@ function PlayerOverlay({ movie, onClose }) {
         }
 
         if (data.soft_sub_url && videoRef.current) {
-          [...videoRef.current.querySelectorAll('track[data-dynamic]')].forEach(t => t.remove());
+          console.log("[Player] Received soft_sub_url:", data.soft_sub_url);
           const v = videoRef.current;
+          const trackUrl = new URL(data.soft_sub_url, base).href;
+          console.log("[Player] Full subtitle track URL:", trackUrl);
+
+          // Remove old tracks
+          [...v.querySelectorAll('track[data-dynamic]')].forEach(t => t.remove());
+
           const t = document.createElement('track');
           t.kind = 'subtitles';
           t.label = 'Selected Subtitle';
           t.srclang = chosenSubtitle ? chosenSubtitle.lang : 'en';
           t.default = true;
-          t.src = new URL(data.soft_sub_url, base).href;
+          t.src = trackUrl;
           t.setAttribute('data-dynamic', '');
-          t.addEventListener('load', () => { if (t.track) t.track.mode = 'showing'; });
+
+          t.addEventListener('load', () => {
+            console.log("[Player] Subtitle track LOADED.");
+            if (t.track) {
+              t.track.mode = 'showing';
+              console.log("[Player] Subtitle track mode set to 'showing'.");
+            }
+          });
+          t.addEventListener('error', (e) => {
+            console.error("[Player] Subtitle track ERROR:", e);
+          });
+
           v.appendChild(t);
+          console.log("[Player] Subtitle track appended to video element.");
+
+          // Force the browser to re-evaluate the tracks
+          if (v.textTracks) {
+            for (let i = 0; i < v.textTracks.length; i++) {
+              v.textTracks[i].mode = 'hidden';
+            }
+            if (v.textTracks.length > 0) {
+                const targetTrack = v.textTracks[v.textTracks.length - 1];
+                targetTrack.mode = 'showing';
+                console.log(`[Player] Manually set mode for track: ${targetTrack.label}`);
+            }
+          }
         }
       } catch (e) {
         console.error("Error starting stream:", e);
