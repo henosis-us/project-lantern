@@ -48,7 +48,8 @@ mimetypes.add_type("text/vtt", ".vtt")
 LMS_PUBLIC_URL = os.getenv("LMS_PUBLIC_URL", "http://localhost:8000")
 IDENTITY_SERVICE_URL = os.getenv("IDENTITY_SERVICE_URL", "http://localhost:8001")
 HEARTBEAT_INTERVAL_MINUTES = int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", 5))
-
+HLS_CLEANUP_INTERVAL_HOURS = 1  # How often to run the cleanup check.
+HLS_SESSION_MAX_AGE_HOURS = 12  # How old a session must be to be deleted.
 active_processes = {}
 SEGMENT_DURATION_SEC = 10
 QUALITY_PRESETS = {'low': 28, 'medium': 23, 'high': 18}
@@ -426,7 +427,64 @@ def run_ffmpeg_sync(movie_id: int, video_path: str, hls_output_dir: str, seek_ti
             if movie_id in active_processes:
                 del active_processes[movie_id]
             logging.info(f"[run_ffmpeg_sync] Cleanup: Process for movie {movie_id} removed from active_processes.")
+async def cleanup_old_hls_sessions():
+    """Periodically scans for and removes old, inactive HLS session directories."""
+    while True:
+        # Wait for the configured interval before running the check.
+        await asyncio.sleep(HLS_CLEANUP_INTERVAL_HOURS * 3600)
+        logging.info("[CLEANUP] Starting periodic HLS cleanup task...")
 
+        hls_base_dir = os.path.join("static", "hls")
+        if not os.path.isdir(hls_base_dir):
+            logging.info("[CLEANUP] HLS base directory not found, skipping.")
+            continue
+
+        # Get a snapshot of all currently active HLS directories.
+        # This prevents deleting a directory that a new process just started using.
+        active_dirs = {os.path.normpath(info["dir"]) for info in active_processes.values()}
+        logging.debug(f"[CLEANUP] Active HLS directories to skip: {active_dirs}")
+
+        now = time.time()
+        max_age_seconds = HLS_SESSION_MAX_AGE_HOURS * 3600
+        total_cleaned = 0
+
+        try:
+            # The structure is /static/hls/{movie_id}/{session_id}
+            for movie_id_dir in os.listdir(hls_base_dir):
+                movie_path = os.path.join(hls_base_dir, movie_id_dir)
+                if not os.path.isdir(movie_path):
+                    continue
+
+                for session_dir in os.listdir(movie_path):
+                    session_path = os.path.join(movie_path, session_dir)
+                    normalized_session_path = os.path.normpath(session_path)
+
+                    if not os.path.isdir(session_path):
+                        continue
+
+                    # CRITICAL: Skip if this directory is part of an active transcode.
+                    if normalized_session_path in active_dirs:
+                        logging.debug(f"[CLEANUP] Skipping active session: {session_path}")
+                        continue
+
+                    try:
+                        dir_mtime = os.path.getmtime(session_path)
+                        age_seconds = now - dir_mtime
+
+                        if age_seconds > max_age_seconds:
+                            logging.info(f"[CLEANUP] Removing old HLS session (age: {age_seconds/3600:.1f}h): {session_path}")
+                            shutil.rmtree(session_path)
+                            total_cleaned += 1
+                    except FileNotFoundError:
+                        # Directory was likely deleted by another process between listing and checking. Safe to ignore.
+                        continue
+                    except Exception as e:
+                        logging.error(f"[CLEANUP] Error processing directory {session_path}: {e}")
+
+        except Exception as e:
+            logging.error(f"[CLEANUP] An unexpected error occurred during the cleanup scan: {e}", exc_info=True)
+
+        logging.info(f"[CLEANUP] Periodic HLS cleanup finished. Removed {total_cleaned} old session(s).")
 async def send_heartbeat(server_unique_id: str):
     """Sends a single heartbeat to the Identity Service."""
     try:
@@ -492,6 +550,7 @@ async def lifespan(app: FastAPI):
     print(f"Sending initial heartbeat for server {server_unique_id} with URL {LMS_PUBLIC_URL}")    
     asyncio.create_task(send_heartbeat(server_unique_id))    
     asyncio.create_task(heartbeat_task(server_unique_id))
+    asyncio.create_task(cleanup_old_hls_sessions())
     yield 
     # Shutdown logic
     print("Server shutting down...")
@@ -897,7 +956,40 @@ def list_episodes(series_id: int, season: Optional[int] = None, current_user=Dep
         rows = conn.execute(f"SELECT {cols} FROM episodes WHERE series_id = ? AND season = ? ORDER BY episode", (series_id, season)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+@app.get("/library/series/{series_id}/next-episode")
+def get_next_episode(
+    series_id: int, 
+    current_season: int, 
+    current_episode: int, 
+    current_user=Depends(get_user_from_gateway)
+):
+    """
+    Finds the next episode in a series, handling season roll-over.
+    """
+    conn = get_db_connection()
+    
+    # First, try to find the next episode in the same season
+    next_in_season = conn.execute(
+        "SELECT * FROM episodes WHERE series_id = ? AND season = ? AND episode = ? ORDER BY episode LIMIT 1",
+        (series_id, current_season, current_episode + 1)
+    ).fetchone()
+    
+    if next_in_season:
+        conn.close()
+        return dict(next_in_season)
+        
+    # If not found, try to find the first episode of the next season
+    next_in_series = conn.execute(
+        "SELECT * FROM episodes WHERE series_id = ? AND season = ? AND episode = 1 ORDER BY season, episode LIMIT 1",
+        (series_id, current_season + 1)
+    ).fetchone()
+    
+    conn.close()
+    if next_in_series:
+        return dict(next_in_series)
 
+    # If no next episode is found in the series, return a 404
+    raise HTTPException(status_code=404, detail="No subsequent episode found.")
 @app.get("/server/claim-info")
 def get_claim_info():
     conn = get_db_connection()

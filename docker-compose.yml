@@ -1,0 +1,30 @@
+services:
+  media-server:
+    build: .
+    image: lantern-media-server
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8090:8000"
+    environment:
+      - DATABASE_PATH=/data/lantern.db
+      - IDENTITY_SERVICE_URL=https://lantern.henosis.us
+      - LMS_PUBLIC_URL=http://73.20.52.255:8090
+      - LOG_LEVEL=DEBUG
+      # --- FIX: Use an unambiguous delimiter '=>' for path mappings ---
+      # Format: "HostPath1=>ContainerPath1,HostPath2=>ContainerPath2"
+      - PATH_MAPPINGS=K:/Movies=>/media/movies,K:/tv show=>/media/tv
+
+    volumes:
+      - .:/app
+      - lantern-data:/data
+      - ./logs:/app/logs
+      # These mounts make the files available to the container at the specified paths.
+      - "K:/Movies:/media/movies"
+      - "K:/tv show:/media/tv"
+
+    restart: unless-stopped
+
+# Define the named volume at the top level.
+# Docker will manage the storage for this volume.
+volumes:
+  lantern-data:

@@ -2,3 +2,12 @@
 # Secrets
 .env
 node_modules/ 
+
+# Backend runtime/generated artifacts (do not commit)
+data/
+logs/
+videos/
+__pycache__/
+
+# Prevent accidental re-commit of local test file that once contained secrets
+test.py
