@@ -1,7 +1,7 @@
 import React from 'react';
 
 // The base URL of your backend server where the static files are hosted.
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = 'https://lantern.henosis.us';
 
 function EpisodeList({ episodes, onPlay }) {
   if (!episodes || episodes.length === 0) {

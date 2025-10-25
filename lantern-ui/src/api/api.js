@@ -20,6 +20,24 @@ identityApi.interceptors.request.use(
   }
 );
 
+// Global response interceptor: if Identity Service returns 401, treat as logged-out
+identityApi.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status;
+    if (status === 401) {
+      try {
+        localStorage.removeItem('jwt');
+      } catch {}
+      // If we're not already on the login page, redirect there
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.replace('/login');
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 
 // --- 2. Media Server API Factory ---
 // This function creates a new, configured Axios instance for a specific media server.
