@@ -16,6 +16,13 @@ export const AuthProvider = ({ children }) => {
       localStorage.setItem('jwt', token);
       try {
         const payload = JSON.parse(atob(token.split('.')[1]));
+        // Proactively invalidate expired tokens
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (payload?.exp && payload.exp <= nowSec) {
+          console.warn("JWT expired, logging out.");
+          logout();
+          return;
+        }
         setUser({ username: payload.sub });
       } catch (e) {
         console.error("Failed to decode JWT", e);
@@ -27,6 +34,11 @@ export const AuthProvider = ({ children }) => {
         setAvailableServers(data);
       } catch (error) {
         console.error("Failed to fetch servers:", error);
+        if (error?.response?.status === 401) {
+          // Not authenticated; ensure full logout which will redirect via ProtectedRoute
+          logout();
+          return;
+        }
         setAvailableServers([]);
       }
     };
