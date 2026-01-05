@@ -228,18 +228,67 @@ function PlayerOverlay({ movie, onClose }) {
   /* --------------- Event Handlers --------------- */
 
   // This handler is now ONLY used for HLS streams.
+  // New behavior: do NOT restart the stream if the seek target is already buffered.
+  // If the user seeks slightly ahead of the buffered end, pause and let buffering catch up.
+  // Only restart the stream when the seek target lies outside the currently buffered ranges
+  // by a meaningful margin (backwards or far forwards).
   const handleHlsSeek = useCallback(() => {
-    if (isStreamStartingRef.current || !videoRef.current) {
-      return;
-    }
+    if (isStreamStartingRef.current || !videoRef.current) return;
+
+    const v = videoRef.current;
+    const BUFFER_EPS = 0.75;           // seconds tolerance when testing if time is inside a buffered range
+    const FORWARD_TOLERANCE = 12;      // if forward seek is within this many seconds beyond buffer end, don't restart
+
     clearTimeout(seekDebounceTimer.current);
     seekDebounceTimer.current = setTimeout(() => {
-      if (videoRef.current) {
-        const seekTime = videoRef.current.currentTime;
-        console.log(`[Player] HLS seek complete. Restarting stream at ${seekTime.toFixed(2)}s.`);
-        startStream(seekTime);
+      if (!v) return;
+
+      const seekTime = v.currentTime;
+      const ranges = v.buffered;
+
+      let isInBuffered = false;
+      let bufStart = 0;
+      let bufEnd = 0;
+      if (ranges && ranges.length) {
+        bufStart = ranges.start(0);
+        bufEnd = ranges.end(ranges.length - 1);
+        for (let i = 0; i < ranges.length; i++) {
+          const start = ranges.start(i) - BUFFER_EPS;
+          const end = ranges.end(i) + BUFFER_EPS;
+          if (seekTime >= start && seekTime <= end) {
+            isInBuffered = true;
+            break;
+          }
+        }
       }
-    }, 800);
+
+      if (isInBuffered) {
+        // Instant play if we are inside an already buffered window
+        console.log(`[Player] Seek within buffered data at ${seekTime.toFixed(2)}s — no restart.`);
+        if (v.paused && !userPausedRef.current) {
+          v.play().catch((e) => console.log("Autoplay on in-buffer seek prevented:", e));
+        }
+        setStatus((s) => (s === 'loading' ? 'playing' : s));
+        return;
+      }
+
+      // Not inside buffered data
+      if (ranges && ranges.length && seekTime > bufEnd) {
+        const gap = seekTime - bufEnd;
+        if (gap <= FORWARD_TOLERANCE) {
+          // Small forward jump: pause and allow ongoing transcode to catch up without server restart
+          console.log(`[Player] Small forward seek ${gap.toFixed(2)}s past buffer end — pausing to await buffer.`);
+          setStatus('loading');
+          if (!v.paused && !userPausedRef.current) v.pause();
+          // onProgress will auto-resume when enough data is buffered
+          return;
+        }
+      }
+
+      // Either backward outside buffered window, or far forward: restart the stream at seekTime
+      console.log(`[Player] Seek outside buffered window to ${seekTime.toFixed(2)}s — restarting stream.`);
+      startStream(seekTime);
+    }, 250);
   }, [startStream]);
 
   const onTimeUpdate = useCallback(() => {
