@@ -751,6 +751,172 @@ body.player-minimized #player-wrapper {
   border-radius: 5px;
   cursor: pointer;
 }
+
+/* Sidecar subtitle list (MovieDetailsModal + SeriesFilesTechModal) */
+.sidecar-subs {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #333;
+}
+
+.sidecar-subs h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 1rem;
+  color: #ddd;
+}
+
+.sidecar-subs ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidecar-subs li {
+  background-color: #2a2a2a;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #3a3a3a;
+}
+
+/* Files & Tech modal for Series */
+.files-tech-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2100;
+  color: #eee;
+}
+
+.files-tech-modal {
+  background-color: #1c1c1c;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+  width: 92%;
+  max-width: 1100px;
+  max-height: 90vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.files-tech-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  background-color: #1a1a1a;
+  border-bottom: 1px solid #333;
+}
+
+.files-tech-modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.files-tech-modal-header .close-btn {
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 24px;
+  font-weight: bold;
+  cursor: pointer;
+  padding: 0 5px;
+  line-height: 1;
+}
+
+.files-tech-modal-header .close-btn:hover {
+  color: #fff;
+}
+
+.files-tech-controls {
+  padding: 12px 18px;
+  border-bottom: 1px solid #333;
+}
+
+.files-tech-controls label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #ccc;
+}
+
+.files-tech-controls select {
+  background-color: #2a2a2a;
+  border: 1px solid #444;
+  color: #eee;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+.files-tech-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 0;
+  min-height: 0;
+  flex: 1;
+}
+
+.files-tech-episode-list {
+  border-right: 1px solid #333;
+  overflow-y: auto;
+}
+
+.files-tech-episode-list h3,
+.files-tech-details h3 {
+  margin: 0;
+  padding: 12px 18px;
+  border-bottom: 1px solid #333;
+  font-size: 1rem;
+}
+
+.files-tech-episode-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.files-tech-episode-list li {
+  display: flex;
+  gap: 10px;
+  padding: 10px 18px;
+  cursor: pointer;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.files-tech-episode-list li:hover {
+  background-color: #242424;
+}
+
+.files-tech-episode-list li.active {
+  background-color: #2b3440;
+}
+
+.files-tech-episode-list .ep-code {
+  font-family: 'Courier New', Courier, monospace;
+  color: #9ecbff;
+  flex-shrink: 0;
+}
+
+.files-tech-episode-list .ep-title {
+  color: #eee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-tech-details {
+  padding: 12px 18px;
+  overflow-y: auto;
+}
 /* --- END: New Movie Details Modal Styles --- */
 
 #group-modal.active {  

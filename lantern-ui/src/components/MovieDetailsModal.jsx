@@ -16,6 +16,8 @@ function MovieDetailsModal({ group, onClose, onPlay, onLibraryRefresh }) {
   const [details, setDetails] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
+  const [sidecarSubs, setSidecarSubs] = useState([]);
+  const [isSubsLoading, setIsSubsLoading] = useState(false);
 
   useEffect(() => {
     if (!group || !mediaServerApi) return; // <-- Add check for mediaServerApi
@@ -23,6 +25,7 @@ function MovieDetailsModal({ group, onClose, onPlay, onLibraryRefresh }) {
     setIsLoading(true);
     setDetails(null);
     setShowInfoPanel(false);
+    setSidecarSubs([]);
 
     // Fetch the full details using the dynamic API instance from the context
     mediaServerApi.get(`/library/movies/${group.rep.id}/details`)
@@ -42,6 +45,59 @@ function MovieDetailsModal({ group, onClose, onPlay, onLibraryRefresh }) {
         setIsLoading(false);
       });
   }, [group, mediaServerApi]); // <-- Add mediaServerApi to dependency array
+
+  useEffect(() => {
+    if (!isOwner || !showInfoPanel || !details || !mediaServerApi) return;
+
+    setIsSubsLoading(true);
+    mediaServerApi.get(`/library/movies/${details.id}/sidecar_subtitles`)
+      .then((res) => setSidecarSubs(res.data || []))
+      .catch((err) => {
+        console.error('Failed to fetch sidecar subtitles:', err);
+        setSidecarSubs([]);
+      })
+      .finally(() => setIsSubsLoading(false));
+  }, [isOwner, showInfoPanel, details, mediaServerApi]);
+
+  const triggerDownload = (url) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const handleDownloadMovieAndSubs = async () => {
+    try {
+      const jwt = localStorage.getItem('jwt');
+      if (!jwt) {
+        alert('Not logged in.');
+        return;
+      }
+
+      const base = mediaServerApi?.defaults?.baseURL;
+      if (!base) {
+        alert('No server selected.');
+        return;
+      }
+
+      // Download the video first
+      triggerDownload(`${base}/download/movie/${representative.id}?token=${encodeURIComponent(jwt)}`);
+
+      // Then download each subtitle file
+      const subs = sidecarSubs?.length
+        ? sidecarSubs
+        : (await mediaServerApi.get(`/library/movies/${representative.id}/sidecar_subtitles`)).data;
+
+      (subs || []).forEach((s) => {
+        triggerDownload(`${base}/download/movie/${representative.id}/subtitle/${encodeURIComponent(s.filename)}?token=${encodeURIComponent(jwt)}`);
+      });
+    } catch (e) {
+      console.error(e);
+      alert('Failed to start download.');
+    }
+  };
 
   const handleFixMetadata = async (movie) => {
     const query = prompt("Search TMDb for…", movie.title);
@@ -150,7 +206,25 @@ function MovieDetailsModal({ group, onClose, onPlay, onLibraryRefresh }) {
                 <p><strong>Audio Codec:</strong> <code>{representative.audio_codec || 'Unknown'}</code></p>
             </div>
             <div className="admin-actions">
+                <button onClick={handleDownloadMovieAndSubs}>Download Video + Sidecar Subtitles</button>
                 <button onClick={() => handleFixMetadata(representative)}>Fix Match...</button>
+            </div>
+
+            <div className="sidecar-subs">
+              <h4>Sidecar Subtitle Files</h4>
+              {isSubsLoading ? (
+                <p>Loading subtitle files...</p>
+              ) : sidecarSubs.length ? (
+                <ul>
+                  {sidecarSubs.map((s) => (
+                    <li key={s.filename}>
+                      <code>{s.filename}</code>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No matching subtitle files found next to this movie.</p>
+              )}
             </div>
           </div>
         )}

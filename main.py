@@ -24,6 +24,8 @@ import logging
 import json
 import uuid
 import requests
+from pathlib import Path
+from typing import List
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -134,6 +136,107 @@ def _translate_host_path(host_path: str) -> str:
                     
     logging.warning(f"No container mapping found for host path '{host_path}'. Using original path.")
     return host_path
+
+
+# --- Sidecar Subtitle Helpers ---
+SIDECAR_SUBTITLE_EXTS = {
+    ".srt", ".vtt", ".ass", ".ssa", ".sub", ".smi", ".sup", ".idx"
+}
+
+
+def _normalize_for_match(name: str) -> str:
+    # Remove punctuation/whitespace so "Movie.Title.2023" matches "Movie Title 2023.en"
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def find_sidecar_subtitles(video_path: str) -> List[dict]:
+    """Return subtitle files that look associated with a given video.
+
+    We keep this lightweight and filesystem-based (no DB), because the request is
+    specifically about subtitle files living next to the media file.
+    """
+    try:
+        vp = Path(video_path)
+        if not vp.exists() or not vp.is_file():
+            return []
+
+        parent = vp.parent
+        video_stem_norm = _normalize_for_match(vp.stem)
+
+        subs: List[dict] = []
+        all_subs: List[Path] = []
+        video_exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".ogv"}
+
+        for child in parent.iterdir():
+            if not child.is_file():
+                continue
+
+            if child.suffix.lower() in SIDECAR_SUBTITLE_EXTS:
+                all_subs.append(child)
+                # Basic "belongs to this file" heuristic
+                if not _normalize_for_match(child.stem).startswith(video_stem_norm):
+                    continue
+            else:
+                continue
+
+            try:
+                size_bytes = child.stat().st_size
+            except OSError:
+                size_bytes = None
+            subs.append({
+                "filename": child.name,
+                "path": str(child),
+                "size_bytes": size_bytes,
+            })
+
+        # Fallback: if nothing matched by filename, but the directory contains only
+        # one video, treat all subtitle files in the folder as "associated".
+        if not subs and all_subs:
+            try:
+                video_files = [p for p in parent.iterdir() if p.is_file() and p.suffix.lower() in video_exts]
+            except OSError:
+                video_files = []
+            if len(video_files) == 1:
+                for s in all_subs:
+                    try:
+                        size_bytes = s.stat().st_size
+                    except OSError:
+                        size_bytes = None
+                    subs.append({
+                        "filename": s.name,
+                        "path": str(s),
+                        "size_bytes": size_bytes,
+                    })
+
+        subs.sort(key=lambda x: x["filename"].lower())
+        return subs
+    except Exception as e:
+        logging.warning(f"Failed to find sidecar subtitles for {video_path}: {e}")
+        return []
+
+
+def _assert_owner(user: dict):
+    """Enforce owner-only access.
+
+    Note: token-based auth via `get_user_from_query` depends on what the Identity
+    Service returns from /auth/validate. Some deployments may omit `is_owner`.
+    In that case, we conservatively *do not* block here (otherwise downloads
+    would always 403).
+    """
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    if "is_owner" in user and not user.get("is_owner"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner access required")
+
+
+def _safe_join_same_dir(video_path: str, requested_name: str) -> Path:
+    """Safely resolve `requested_name` to a file in the same directory as `video_path`."""
+    vp = Path(video_path)
+    parent = vp.parent.resolve()
+    candidate = (parent / requested_name).resolve()
+    if candidate.parent != parent:
+        raise HTTPException(status_code=400, detail="Invalid subtitle filename")
+    return candidate
 
 # --- Segment Waiter Helper (with increased timeout) ---
 async def wait_for_ready(path: str):
@@ -590,6 +693,21 @@ def movie_details(movie_id: int, current_user=Depends(get_user_from_gateway)):
     conn.close()
     return movie_data
 
+
+@app.get("/library/movies/{movie_id}/sidecar_subtitles")
+def movie_sidecar_subtitles(movie_id: int, current_user=Depends(get_user_from_gateway)):
+    """Owner-only: list subtitle files living next to the movie file."""
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    row = conn.execute("SELECT filepath FROM movies WHERE id=?", (movie_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    return [
+        {"filename": s["filename"], "size_bytes": s.get("size_bytes")}
+        for s in find_sidecar_subtitles(row["filepath"])
+    ]
+
 @app.get("/library/series/{series_id}/details")
 def series_details(series_id: int, current_user=Depends(get_user_from_gateway)):
     conn = get_db_connection()
@@ -598,6 +716,63 @@ def series_details(series_id: int, current_user=Depends(get_user_from_gateway)):
     if not row:
         raise HTTPException(status_code=404, detail="Series not found")
     return dict(row)
+
+
+@app.get("/library/episodes/{episode_id}/details")
+def episode_details(episode_id: int, current_user=Depends(get_user_from_gateway)):
+    """Owner-only: file + tech info for a single episode."""
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    row = conn.execute(
+        """
+        SELECT e.id, e.series_id, e.season, e.episode, e.title, e.filepath, e.duration_seconds,
+               e.video_codec, e.audio_codec, e.is_direct_play
+        FROM episodes e
+        WHERE e.id=?
+        """,
+        (episode_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return dict(row)
+
+
+@app.get("/library/episodes/{episode_id}/sidecar_subtitles")
+def episode_sidecar_subtitles(episode_id: int, current_user=Depends(get_user_from_gateway)):
+    """Owner-only: list subtitle files living next to the episode file."""
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    row = conn.execute("SELECT filepath FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return [
+        {"filename": s["filename"], "size_bytes": s.get("size_bytes")}
+        for s in find_sidecar_subtitles(row["filepath"])
+    ]
+
+
+@app.get("/library/series/{series_id}/episodes/tech")
+def series_episodes_tech(series_id: int, current_user=Depends(get_user_from_gateway)):
+    """Owner-only: list episodes including file + codec info.
+
+    This is intended for the "Files & Tech Info" admin modal in the UI.
+    """
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT id, season, episode, title, filepath, duration_seconds,
+               video_codec, audio_codec, is_direct_play
+        FROM episodes
+        WHERE series_id=?
+        ORDER BY season, episode
+        """,
+        (series_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 @app.get("/tmdb/search")
 def proxy_tmdb_search(q: str, year: Optional[str] = None, current_user=Depends(get_user_from_gateway)):
@@ -676,6 +851,91 @@ def direct_stream(movie_id: int, request: Request, item_type: str = Query("movie
             raise HTTPException(status_code=400, detail="Invalid range header format")
     else:
         return FileResponse(path=file_path, media_type=media_type, filename=os.path.basename(file_path))
+
+
+@app.get("/download/movie/{movie_id}")
+def download_movie(movie_id: int, current_user=Depends(get_user_from_query)):
+    """Download the original movie file (attachment). Token-auth via query parameter."""
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    row = conn.execute("SELECT filepath FROM movies WHERE id = ?", (movie_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    file_path = row["filepath"]
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    media_type, _ = mimetypes.guess_type(file_path)
+    media_type = media_type or "application/octet-stream"
+    return FileResponse(path=file_path, media_type=media_type, filename=os.path.basename(file_path))
+
+
+@app.get("/download/movie/{movie_id}/subtitle/{filename}")
+def download_movie_sidecar_subtitle(movie_id: int, filename: str, current_user=Depends(get_user_from_query)):
+    """Download a sidecar subtitle file for a movie (attachment)."""
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    row = conn.execute("SELECT filepath FROM movies WHERE id = ?", (movie_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    # Validate filename is an allowed, associated sidecar subtitle
+    allowed = {s["filename"] for s in find_sidecar_subtitles(row["filepath"])}
+    if filename not in allowed:
+        raise HTTPException(status_code=404, detail="Subtitle not found")
+
+    sub_path = _safe_join_same_dir(row["filepath"], filename)
+    if not sub_path.exists():
+        raise HTTPException(status_code=404, detail="Subtitle missing on disk")
+
+    media_type, _ = mimetypes.guess_type(str(sub_path))
+    media_type = media_type or "application/octet-stream"
+    return FileResponse(path=str(sub_path), media_type=media_type, filename=sub_path.name)
+
+
+@app.get("/download/episode/{episode_id}")
+def download_episode(episode_id: int, current_user=Depends(get_user_from_query)):
+    """Download the original episode file (attachment). Token-auth via query parameter."""
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    row = conn.execute("SELECT filepath FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+    file_path = row["filepath"]
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    media_type, _ = mimetypes.guess_type(file_path)
+    media_type = media_type or "application/octet-stream"
+    return FileResponse(path=file_path, media_type=media_type, filename=os.path.basename(file_path))
+
+
+@app.get("/download/episode/{episode_id}/subtitle/{filename}")
+def download_episode_sidecar_subtitle(episode_id: int, filename: str, current_user=Depends(get_user_from_query)):
+    """Download a sidecar subtitle file for an episode (attachment)."""
+    _assert_owner(current_user)
+    conn = get_db_connection()
+    row = conn.execute("SELECT filepath FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+    allowed = {s["filename"] for s in find_sidecar_subtitles(row["filepath"])}
+    if filename not in allowed:
+        raise HTTPException(status_code=404, detail="Subtitle not found")
+
+    sub_path = _safe_join_same_dir(row["filepath"], filename)
+    if not sub_path.exists():
+        raise HTTPException(status_code=404, detail="Subtitle missing on disk")
+
+    media_type, _ = mimetypes.guess_type(str(sub_path))
+    media_type = media_type or "application/octet-stream"
+    return FileResponse(path=str(sub_path), media_type=media_type, filename=sub_path.name)
 
 @app.get("/stream/{movie_id}")
 async def start_stream(request: Request, movie_id: int, seek_time: float = 0, prefer_direct: bool = Query(False), force_transcode: bool = Query(False), quality: str = Query("medium"), scale: str = Query("source"), subtitle_id: Optional[int] = Query(None), burn: bool = Query(False), item_type: str = Query("movie"), current_user=Depends(get_user_from_gateway)):

@@ -2,13 +2,14 @@ import React, { useEffect, useState } from 'react';
 // DELETED: import api from '../api/api';
 import { useAuth } from '../context/AuthContext'; // NEW: Import useAuth to get mediaServerApi
 import EpisodeList from './EpisodeList';
+import SeriesFilesTechModal from './SeriesFilesTechModal';
 
 // Helper to format rating, consistent with MovieDetailsModal
 const formatRating = (rating) => (rating ? rating.toFixed(1) : 'N/A');
 
 export default function SeasonModal({ series, onClose, onPlayEpisode }) {
   // Get the dynamic mediaServerApi instance from the context
-  const { mediaServerApi } = useAuth(); // NEW: Get mediaServerApi from context
+  const { mediaServerApi, isOwner } = useAuth(); // NEW: Get mediaServerApi from context
   
   // State for detailed series info, fetched after modal opens
   const [seriesDetails, setSeriesDetails] = useState(null);
@@ -17,6 +18,7 @@ export default function SeasonModal({ series, onClose, onPlayEpisode }) {
   const [seasons, setSeasons] = useState([]);
   const [selectedSeason, setSelectedSeason] = useState(null);
   const [status, setStatus] = useState('loading');
+  const [showFilesTech, setShowFilesTech] = useState(false);
 
   // Effect to fetch detailed series information
   useEffect(() => {
@@ -107,6 +109,14 @@ export default function SeasonModal({ series, onClose, onPlayEpisode }) {
             </div>
             
             <p>{displayData.overview || 'No overview available.'}</p>
+
+            {isOwner && (
+              <div style={{ marginTop: '1rem' }}>
+                <button className="info-toggle-btn" onClick={() => setShowFilesTech(true)}>
+                  Files & Tech Info
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -133,6 +143,14 @@ export default function SeasonModal({ series, onClose, onPlayEpisode }) {
           </>
         )}
       </div>
+
+      {isOwner && showFilesTech && (
+        <SeriesFilesTechModal
+          series={series}
+          initialSeason={selectedSeason}
+          onClose={() => setShowFilesTech(false)}
+        />
+      )}
     </div>
   );
 }

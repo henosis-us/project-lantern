@@ -127,11 +127,18 @@ def initialize_db():
             season           INTEGER NOT NULL, episode          INTEGER NOT NULL, title            TEXT,
             overview         TEXT, filepath         TEXT    NOT NULL UNIQUE, duration_seconds INTEGER DEFAULT 0,
             air_date         TEXT, extra_type       TEXT, still_path       TEXT,
+            video_codec      TEXT, audio_codec     TEXT, is_direct_play   INTEGER DEFAULT 0,
             FOREIGN KEY (series_id) REFERENCES series(id) ON DELETE CASCADE
         )
     """)
     # Add missing columns for episodes table
-    for col, ddl in (("overview", "TEXT"), ("still_path", "TEXT")):
+    for col, ddl in (
+        ("overview", "TEXT"),
+        ("still_path", "TEXT"),
+        ("video_codec", "TEXT"),
+        ("audio_codec", "TEXT"),
+        ("is_direct_play", "INTEGER DEFAULT 0"),
+    ):
         try:
             cursor.execute(f"ALTER TABLE episodes ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:

@@ -710,20 +710,32 @@ def scan_tv_file(conn, cursor, file_path, interactive: bool = False) -> bool:
     duration_seconds = get_video_duration(file_path)
     abs_path = str(file_path.resolve())
 
+    # Probe for technical info (mirrors movies)
+    codecs = probe_media_file(file_path)
+    video_codec = codecs.get('v')
+    audio_codec = codecs.get('a', {}).get('name')
+    is_direct_play = 1 if can_direct_play(file_path) else 0
+
     # Step 1: Insert/update episode data
     cursor.execute("""
         INSERT INTO episodes
             (series_id, season, episode, title, overview, filepath, duration_seconds,
-             air_date, extra_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             air_date, extra_type, video_codec, audio_codec, is_direct_play)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(filepath) DO UPDATE SET
             duration_seconds = excluded.duration_seconds,
             title            = COALESCE(episodes.title, excluded.title),
             overview         = COALESCE(episodes.overview, excluded.overview),
             air_date         = COALESCE(episodes.air_date, excluded.air_date),
-            extra_type       = excluded.extra_type
-    """, (series_id, season, episode_num, episode_title, overview, abs_path,
-          duration_seconds, air_date, extra_type if extra else None))
+            extra_type       = excluded.extra_type,
+            video_codec      = COALESCE(episodes.video_codec, excluded.video_codec),
+            audio_codec      = COALESCE(episodes.audio_codec, excluded.audio_codec),
+            is_direct_play   = excluded.is_direct_play
+    """, (
+        series_id, season, episode_num, episode_title, overview, abs_path,
+        duration_seconds, air_date, extra_type if extra else None,
+        video_codec, audio_codec, is_direct_play
+    ))
 
     # Step 2: Get the episode's database ID
     episode_id = cursor.execute("SELECT id FROM episodes WHERE filepath = ?", (abs_path,)).fetchone()["id"]

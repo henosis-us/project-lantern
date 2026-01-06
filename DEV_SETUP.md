@@ -46,7 +46,7 @@ ffprobe -version
 ## 1) Clone
 
 ```powershell
-git clone <REPO_URL>
+git clone https://github.com/henosis-us/project-lantern.git
 cd project-lantern
 ```
 
