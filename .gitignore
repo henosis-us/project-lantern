@@ -1,4 +1,24 @@
 
 # Secrets
 .env
-node_modules/ 
+.env.local
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local logs / scratch
+logs/
+cli_logs.txt
+
+# Runtime / generated
+data/
+static/
+*.db
+
+# Agent/tool backups
+*.bak

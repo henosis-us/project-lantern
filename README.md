@@ -1,6 +1,8 @@
 # Lantern
 Lantern is a distributed open video-serving platform featuring a central identity service, a media server for content management and streaming, and a web-based frontend for user interaction. It enables secure remote access via a public-link gateway. The backend is built with FastAPI and SQLite/PostgreSQL, while the frontend uses React and JSX for a responsive user interface.
 
+For the fastest local setup on Windows, see: **`DEV_SETUP.md`**.
+
 ## Project Overview
 - **Backend Components**:
   - **Media Server**: Handles media library scanning, streaming (HLS and direct play), subtitle management, watch history, and API endpoints.
@@ -55,7 +57,10 @@ Lantern is actively evolving to enhance functionality and close gaps with compet
 
 ## Development
 - **Backend**:
-  - **Dependencies**: Managed via `requirements.txt`. Install with `pip install -r requirements.txt`.
+  - **Dependencies**:
+    - Media Server: `project-lantern/requirements.txt`
+    - Identity Service: `project-lantern/identity-service/requirements.txt`
+    - Install with `pip install -r <requirements.txt>` in each service folder.
   - **Running Tests**: Use Python's unittest (e.g., `python scanner.py --test`).
   - **Logging**: Configure `LOG_LEVEL` in `.env` for debug output.
 - **Frontend**:

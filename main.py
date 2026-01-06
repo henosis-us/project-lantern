@@ -488,11 +488,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Project Lantern", lifespan=lifespan)
 
-app.add_middleware(    
-    CORSMiddleware,    
-    allow_origins=["http://localhost:5173", "https://lantern.henosis.us"],    
-    allow_credentials=True,    
-    allow_methods=["*"],    
+origins_from_env_str = os.getenv("ALLOWED_ORIGINS", "https://lantern.henosis.us,http://localhost:5173")
+configured_origins = [o.strip() for o in origins_from_env_str.split(',') if o.strip()]
+logging.info(f"CORS middleware configured with origins: {configured_origins}")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=configured_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 

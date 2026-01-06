@@ -2,8 +2,15 @@ import axios from 'axios';
 
 // --- 1. Lantern Identity Service API ---
 // This is a static instance for user auth, registration, and server management.
+
+// Local dev:
+//   set `VITE_IDENTITY_BASE_URL=http://localhost:8001` in `lantern-ui/.env.local`
+// Production fallback:
+//   https://lantern.henosis.us
+const identityBaseUrl = import.meta.env.VITE_IDENTITY_BASE_URL || 'https://lantern.henosis.us';
+
 export const identityApi = axios.create({
-  baseURL: 'https://lantern.henosis.us', // No /api suffix as per your plan
+  baseURL: identityBaseUrl, // No /api suffix as per your plan
 });
 
 // Interceptor to add the auth token to every Identity Service request
