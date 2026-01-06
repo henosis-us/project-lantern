@@ -11,6 +11,10 @@ __pycache__/
 *.pyc
 .venv/
 
+# Workspace scratch (do not commit local validation venv / data)
+workspace/.venv*/
+workspace/dev_data/
+
 # Local logs / scratch
 logs/
 cli_logs.txt

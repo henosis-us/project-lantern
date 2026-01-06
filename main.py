@@ -454,8 +454,10 @@ async def lifespan(app: FastAPI):
         claim_token = claim_token_data.get("claim_token")                
         cursor.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('claim_token', ?)", (claim_token,))        
         conn.commit()                
-        print("\n" + "="*50)        
-        print("🚀 Your Lantern Media Server is running!")        
+        print("\n" + "="*50)
+        # NOTE: keep console output ASCII-only for smooth Windows dev experience
+        # (default Windows codepages can raise UnicodeEncodeError on emojis).
+        print("Your Lantern Media Server is running!")
         print("To link this server to your account, enter the following details in the web UI:")        
         print(f"  - Server URL:    {LMS_PUBLIC_URL}")        
         print(f"  - Claim Token:   {claim_token}")        

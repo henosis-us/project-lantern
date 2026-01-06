@@ -2,7 +2,11 @@ fastapi
 uvicorn[standard]
 sqlalchemy
 psycopg2-binary  # The PostgreSQL driver
+# NOTE: passlib 1.7.4 is incompatible with bcrypt>=4 (it can raise
+# ValueError: password cannot be longer than 72 bytes during backend checks).
+# Keep bcrypt pinned for a smooth fresh install.
 passlib[bcrypt]
+bcrypt<4
 python-jose[cryptography]
 pydantic[email]
 python-multipart
